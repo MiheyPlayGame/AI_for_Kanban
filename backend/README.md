@@ -5,6 +5,7 @@
 - хранения нескольких чатов на пользователя;
 - хранения сообщений в каждом чате;
 - хранения `attachments` у пользовательских сообщений;
+- подключения Notion-базы пользователя как дополнительного контекста;
 - проксирования пользовательского сообщения в LLM через Hugging Face.
 
 ## Стек
@@ -35,6 +36,10 @@
   - `message_id` (FK -> messages.id)
   - `file_name` (string)
   - `file_url` (text)
+- `notion_integrations`
+  - `user_id` (PK + FK -> users.id)
+  - `api_key` (text)
+  - `database_id` (string)
 
 ## Запуск через Docker
 
@@ -82,6 +87,7 @@ uvicorn app.main:app --reload
 - `JWT_SECRET`, `JWT_ALGORITHM`
 - `ACCESS_TOKEN_MINUTES`, `REFRESH_TOKEN_MINUTES`
 - `HF_TOKEN`, `HF_MODEL`
+- `NOTION_CLIENT_ID`, `NOTION_CLIENT_SECRET`, `NOTION_REDIRECT_URI`, `NOTION_OAUTH_STATE_TTL_MINUTES`
 
 ## API эндпоинты
 
@@ -98,6 +104,22 @@ uvicorn app.main:app --reload
 ### Messages
 - `GET /chats/{chat_id}/messages` — история сообщений чата
 - `POST /chats/{chat_id}/messages` — отправить сообщение в чат с `attachments`, сохранить ответ модели
+- `POST /tasks/decompose-from-notion` — декомпозировать задачу из Notion-контекста и сохранить результат как сообщение ассистента в чат
+
+### Notion
+- `POST /integrations/notion/connect` — подключить Notion через `api_key + database_id`
+- `POST /integrations/notion/oauth/start` — получить `auth_url` для OAuth-подключения
+- `GET /integrations/notion/oauth/callback` — callback для завершения OAuth
+- `GET /integrations/notion/status` — проверить статус подключения
+- `GET /integrations/notion/context` — получить нормализованный контекст из доски
+- `DELETE /integrations/notion` — отключить интеграцию
+
+## OAuth подключение Notion (без UI)
+
+1. Авторизуйся в API и получи `access_token`.
+2. Вызови `POST /integrations/notion/oauth/start` с `database_id` нужной Notion-базы.
+3. Открой `auth_url` из ответа в браузере и подтверди доступ.
+4. Notion вернет пользователя на `NOTION_REDIRECT_URI`, а backend завершит подключение.
 
 ## Пример флоу
 
@@ -106,6 +128,7 @@ uvicorn app.main:app --reload
    - `Authorization: Bearer <token>`
 3. Создай чат (`POST /chats`).
 4. Отправляй сообщения (`POST /chats/{chat_id}/messages`).
+5. Если Notion подключен, контекст доски автоматически добавляется к пользовательскому сообщению перед вызовом LLM.
 
 ## Важно
 

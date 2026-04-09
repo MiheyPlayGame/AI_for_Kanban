@@ -14,6 +14,12 @@ class User(Base):
     password: Mapped[str] = mapped_column(String(256), nullable=False)
 
     chats: Mapped[list["Chat"]] = relationship("Chat", back_populates="user", cascade="all, delete-orphan")
+    notion_integration: Mapped["NotionIntegration | None"] = relationship(
+        "NotionIntegration",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
 
 class Chat(Base):
@@ -61,3 +67,17 @@ class Attachment(Base):
     file_url: Mapped[str] = mapped_column(Text, nullable=False)
 
     message: Mapped["Message"] = relationship("Message", back_populates="attachments")
+
+
+class NotionIntegration(Base):
+    __tablename__ = "notion_integrations"
+
+    user_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    api_key: Mapped[str] = mapped_column(Text, nullable=False)
+    database_id: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    user: Mapped["User"] = relationship("User", back_populates="notion_integration")
