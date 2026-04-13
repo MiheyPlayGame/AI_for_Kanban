@@ -1,0 +1,7 @@
+# Optional: local Gemma 4+ (HF_LOCAL_TRANSFORMERS=1). Not used by default API-only installs.
+torch>=2.2.0
+torchvision
+transformers>=4.57.6
+accelerate>=0.34.0
+safetensors
+pillow
