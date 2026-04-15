@@ -1,7 +1,7 @@
 import { browser } from "wxt/browser";
 import { defineBackground } from "wxt/utils/define-background";
 
-const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
+const DEFAULT_API_BASE_URL = "http://localhost:8000";
 
 type Tokens = {
   access_token: string;
@@ -19,9 +19,39 @@ type RuntimeMessage =
   | { type: "sendMessage"; accessToken: string; chatId: string; content: string }
   | { type: "saveTokens"; tokens: Tokens | null };
 
+type RuntimeResponse = {
+  ok?: boolean;
+  __error?: string;
+  [key: string]: any;
+};
+
+function normalizeApiBaseUrl(rawValue?: string) {
+  if (!rawValue || typeof rawValue !== "string") {
+    return DEFAULT_API_BASE_URL;
+  }
+
+  // Fix common typo like localhost//8000 and trim trailing slash.
+  const prepared = rawValue
+    .replace("localhost//", "localhost:")
+    .replace(/\/+$/, "")
+    .trim();
+
+  if (!prepared) {
+    return DEFAULT_API_BASE_URL;
+  }
+
+  try {
+    const withProtocol = prepared.includes("://") ? prepared : `http://${prepared}`;
+    const url = new URL(withProtocol);
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return DEFAULT_API_BASE_URL;
+  }
+}
+
 async function getApiBaseUrl() {
   const config = await browser.storage.local.get("apiBaseUrl");
-  return (config.apiBaseUrl as string) || DEFAULT_API_BASE_URL;
+  return normalizeApiBaseUrl(config.apiBaseUrl as string | undefined);
 }
 
 async function request(path: string, options: RequestInit = {}) {
@@ -95,54 +125,81 @@ export default defineBackground(() => {
 
   browser.runtime.onInstalled.addListener(async () => {
     const storage = await browser.storage.local.get(["apiBaseUrl", "tokens"]);
-    if (!storage.apiBaseUrl) {
-      await browser.storage.local.set({ apiBaseUrl: DEFAULT_API_BASE_URL });
+    const normalizedApiBaseUrl = normalizeApiBaseUrl(storage.apiBaseUrl as string | undefined);
+    if (storage.apiBaseUrl !== normalizedApiBaseUrl) {
+      await browser.storage.local.set({ apiBaseUrl: normalizedApiBaseUrl });
     }
     if (!storage.tokens) {
       await browser.storage.local.set({ tokens: null });
     }
   });
 
-  browser.runtime.onMessage.addListener((message: RuntimeMessage) => {
-    return (async () => {
+  browser.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendResponse) => {
+    (async () => {
       switch (message.type) {
         case "health":
-          return request("/health");
+          sendResponse(await request("/health"));
+          return;
         case "register":
-          return request("/auth/register", {
-            method: "POST",
-            body: JSON.stringify({ id: message.id, password: message.password })
-          });
+          sendResponse(
+            await request("/auth/register", {
+              method: "POST",
+              body: JSON.stringify({ id: message.id, password: message.password })
+            })
+          );
+          return;
         case "login":
-          return request("/auth/login", {
-            method: "POST",
-            body: JSON.stringify({ id: message.id, password: message.password })
-          });
+          sendResponse(
+            await request("/auth/login", {
+              method: "POST",
+              body: JSON.stringify({ id: message.id, password: message.password })
+            })
+          );
+          return;
         case "createChat":
-          return request("/chats", {
-            method: "POST",
-            headers: { Authorization: `Bearer ${message.accessToken}` }
-          });
+          sendResponse(
+            await request("/chats", {
+              method: "POST",
+              headers: { Authorization: `Bearer ${message.accessToken}` }
+            })
+          );
+          return;
         case "listChats":
-          return request("/chats", {
-            headers: { Authorization: `Bearer ${message.accessToken}` }
-          });
+          sendResponse(
+            await request("/chats", {
+              headers: { Authorization: `Bearer ${message.accessToken}` }
+            })
+          );
+          return;
         case "getMessages":
-          return request(`/chats/${message.chatId}/messages`, {
-            headers: { Authorization: `Bearer ${message.accessToken}` }
-          });
+          sendResponse(
+            await request(`/chats/${message.chatId}/messages`, {
+              headers: { Authorization: `Bearer ${message.accessToken}` }
+            })
+          );
+          return;
         case "sendMessage":
-          return request(`/chats/${message.chatId}/messages`, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${message.accessToken}` },
-            body: JSON.stringify({ content: message.content, attachments: [] })
-          });
+          sendResponse(
+            await request(`/chats/${message.chatId}/messages`, {
+              method: "POST",
+              headers: { Authorization: `Bearer ${message.accessToken}` },
+              body: JSON.stringify({ content: message.content, attachments: [] })
+            })
+          );
+          return;
         case "saveTokens":
           await browser.storage.local.set({ tokens: message.tokens });
-          return { ok: true };
+          sendResponse({ ok: true });
+          return;
         default:
-          return { ok: false };
+          sendResponse({ ok: false });
       }
-    })();
+    })().catch((error: any) => {
+      const payload: RuntimeResponse = { __error: error?.message || "Unknown extension runtime error." };
+      sendResponse(payload);
+    });
+
+    // Required for Chromium callback-based async responses.
+    return true;
   });
 });

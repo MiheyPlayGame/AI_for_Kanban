@@ -14,7 +14,7 @@ This folder contains a cross-browser web extension scaffold (Chromium + Firefox)
   - `POST /chats`
   - `GET /chats/{chat_id}/messages`
   - `POST /chats/{chat_id}/messages`
-- Backend URL default: `http://127.0.0.1:8000`
+- Backend URL default: `http://localhost:8000`
 
 ## Install
 
@@ -30,6 +30,7 @@ npm run dev
 ```
 
 Then:
+
 1. Open `chrome://extensions` (or Edge/Brave equivalent)
 2. Enable Developer mode
 3. Load unpacked extension from `.output/chrome-mv3`
@@ -42,6 +43,7 @@ npm run dev:firefox
 ```
 
 Then:
+
 1. Open `about:debugging#/runtime/this-firefox`
 2. Click "Load Temporary Add-on"
 3. Select `.output/firefox-mv2/manifest.json`
@@ -63,6 +65,6 @@ npm run zip:firefox
 
 ## Backend integration notes
 
-- Start backend from the `backend` branch on `http://127.0.0.1:8000`
+- Start backend from the `backend` branch on `http://localhost:8000`
 - Extension checks `/health` every 5s
 - Auth is prompted by the panel buttons and backend tokens are stored in extension local storage

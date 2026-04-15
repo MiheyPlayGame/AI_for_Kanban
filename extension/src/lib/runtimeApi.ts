@@ -4,34 +4,42 @@ export type Tokens = {
   token_type: string;
 };
 
+async function sendRuntimeMessage<T = any>(payload: Record<string, any>): Promise<T> {
+  const response = await browser.runtime.sendMessage(payload);
+  if (response?.__error) {
+    throw new Error(response.__error);
+  }
+  return response as T;
+}
+
 export function checkHealth() {
-  return browser.runtime.sendMessage({ type: "health" });
+  return sendRuntimeMessage({ type: "health" });
 }
 
 export function register(id: string, password: string) {
-  return browser.runtime.sendMessage({ type: "register", id, password });
+  return sendRuntimeMessage({ type: "register", id, password });
 }
 
 export function login(id: string, password: string) {
-  return browser.runtime.sendMessage({ type: "login", id, password });
+  return sendRuntimeMessage({ type: "login", id, password });
 }
 
 export function createChat(accessToken: string) {
-  return browser.runtime.sendMessage({ type: "createChat", accessToken });
+  return sendRuntimeMessage({ type: "createChat", accessToken });
 }
 
 export function listChats(accessToken: string) {
-  return browser.runtime.sendMessage({ type: "listChats", accessToken });
+  return sendRuntimeMessage({ type: "listChats", accessToken });
 }
 
 export function getMessages(accessToken: string, chatId: string) {
-  return browser.runtime.sendMessage({ type: "getMessages", accessToken, chatId });
+  return sendRuntimeMessage({ type: "getMessages", accessToken, chatId });
 }
 
 export function sendMessage(accessToken: string, chatId: string, content: string) {
-  return browser.runtime.sendMessage({ type: "sendMessage", accessToken, chatId, content });
+  return sendRuntimeMessage({ type: "sendMessage", accessToken, chatId, content });
 }
 
 export function saveTokens(tokens: Tokens | null) {
-  return browser.runtime.sendMessage({ type: "saveTokens", tokens });
+  return sendRuntimeMessage({ type: "saveTokens", tokens });
 }

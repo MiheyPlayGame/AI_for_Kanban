@@ -18,21 +18,36 @@ const quickActions = [
   "Sprint health report"
 ];
 
+function normalizeTokens(payload: any): Tokens {
+  const accessToken = payload?.access_token ?? payload?.access_tocken;
+  const refreshToken = payload?.refresh_token ?? payload?.refresh_tocken;
+  const tokenType = payload?.token_type ?? "bearer";
+
+  if (!accessToken || !refreshToken) {
+    throw new Error("Sign in failed: backend did not return valid tokens.");
+  }
+
+  return {
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    token_type: tokenType
+  };
+}
+
 export default function ExtensionPanelApp() {
   const [open, setOpen] = useState(false);
   const [backendReady, setBackendReady] = useState(false);
   const [tokens, setTokens] = useState<Tokens | null>(null);
+  const [userId, setUserId] = useState("Guest");
   const [chatId, setChatId] = useState<string | null>(null);
   const [messages, setMessages] = useState<any[]>([]);
   const [draft, setDraft] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   const isAuthenticated = Boolean(tokens?.access_token);
-  const userName = useMemo(() => {
-    const tokenPrefix = tokens?.access_token?.slice(0, 8);
-    return tokenPrefix ? `token:${tokenPrefix}` : "Guest";
-  }, [tokens]);
+  const userName = useMemo(() => (isAuthenticated ? userId : "Guest"), [isAuthenticated, userId]);
 
   useEffect(() => {
     let stopped = false;
@@ -57,14 +72,10 @@ export default function ExtensionPanelApp() {
   }, []);
 
   useEffect(() => {
-    const handler = (message: { type?: string }) => {
-      if (message?.type === "togglePanel") {
-        setOpen((prev) => !prev);
-      }
-    };
-    browser.runtime.onMessage.addListener(handler);
+    const handler = () => setOpen((prev) => !prev);
+    window.addEventListener("asya:toggle-panel", handler);
     return () => {
-      browser.runtime.onMessage.removeListener(handler);
+      window.removeEventListener("asya:toggle-panel", handler);
     };
   }, []);
 
@@ -80,9 +91,23 @@ export default function ExtensionPanelApp() {
 
     setLoading(true);
     setError("");
+    setNotice("");
     try {
-      const tokenPayload = mode === "register" ? await register(id.trim(), password) : await login(id.trim(), password);
+      const trimmedId = id.trim();
+      if (!trimmedId) {
+        throw new Error("User id is required.");
+      }
+
+      if (mode === "register") {
+        await register(trimmedId, password);
+        setNotice("Registration successful. Now sign in.");
+        return;
+      }
+
+      const tokenPayloadRaw = await login(trimmedId, password);
+      const tokenPayload = normalizeTokens(tokenPayloadRaw);
       setTokens(tokenPayload);
+      setUserId(trimmedId);
       await saveTokens(tokenPayload);
       const chats = await listChats(tokenPayload.access_token);
       if (chats.length > 0) {
@@ -207,6 +232,7 @@ export default function ExtensionPanelApp() {
                 ? `Connected chat: ${chatId}`
                 : "Create a chat to start."}
           </p>
+          {notice ? <p className="chat-hint">{notice}</p> : null}
           {error ? <p className="status-error">{error}</p> : null}
 
           {isAuthenticated ? (
