@@ -118,3 +118,64 @@ class TaskDecomposeRequest(BaseModel):
 class TaskDecomposeResponse(BaseModel):
     assistant_message: MessageRead
     source_task: NotionContextItem
+
+
+class SummaryContextItem(BaseModel):
+    link: str | None = None
+    text: str | None = None
+    content: str | None = None
+    title: str | None = None
+    properties: dict[str, str | int | float | bool | None | list[str]] = Field(default_factory=dict)
+
+
+class SummaryRequest(BaseModel):
+    text: str | None = None
+    link: str | None = None
+    context: list[SummaryContextItem] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_source(self):
+        has_text = bool(self.text and self.text.strip())
+        has_link = bool(self.link and self.link.strip())
+        if has_text == has_link:
+            raise ValueError("Provide exactly one of text or link")
+        return self
+
+
+class SummaryResponse(BaseModel):
+    summary: str
+    source: str
+
+
+class SemanticSearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+    chat_id: UUID | None = None
+    top_k: int = Field(default=5, ge=1, le=20)
+    notion_limit: int = Field(default=20, ge=1, le=50)
+    include_notion: bool = True
+    include_chat_history: bool = True
+
+
+class SemanticNotionMatch(BaseModel):
+    score: float
+    item: NotionContextItem
+
+
+class SemanticChatMatch(BaseModel):
+    score: float
+    message: MessageRead
+
+
+class SemanticInformationMatch(BaseModel):
+    score: float
+    source_type: str
+    source_id: str
+    source_label: str
+    snippet: str
+
+
+class SemanticSearchResponse(BaseModel):
+    query: str
+    notion_matches: list[SemanticNotionMatch] = Field(default_factory=list)
+    chat_matches: list[SemanticChatMatch] = Field(default_factory=list)
+    information_matches: list[SemanticInformationMatch] = Field(default_factory=list)
