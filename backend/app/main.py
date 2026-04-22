@@ -1,6 +1,9 @@
 import os
 import json
+import re
+import math
 from uuid import UUID
+from urllib import error, request
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy import select
@@ -34,7 +37,14 @@ from app.schemas import (
     NotionStatusResponse,
     RefreshRequest,
     RegisterRequest,
+    SemanticChatMatch,
+    SemanticInformationMatch,
+    SemanticNotionMatch,
+    SemanticSearchRequest,
+    SemanticSearchResponse,
     SendMessageResponse,
+    SummaryRequest,
+    SummaryResponse,
     TaskDecomposeRequest,
     TaskDecomposeResponse,
     TokenResponse,
@@ -62,9 +72,323 @@ def run_tests_on_startup():
         raise RuntimeError("Startup tests failed. Server startup aborted.")
 
 
+def _extract_text_from_context_link(link: str, context: list[dict]) -> str | None:
+    normalized_link = link.strip()
+    for item in context:
+        item_link = str(item.get("link") or item.get("url") or "").strip()
+        if item_link != normalized_link:
+            continue
+        for key in ("text", "content", "description", "summary", "title"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        props = item.get("properties")
+        if isinstance(props, dict):
+            for key in ("text", "content", "description", "details"):
+                value = props.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return None
+
+
+def _clean_html_to_text(html: str) -> str:
+    without_script = re.sub(r"<script[^>]*>[\s\S]*?</script>", " ", html, flags=re.IGNORECASE)
+    without_style = re.sub(r"<style[^>]*>[\s\S]*?</style>", " ", without_script, flags=re.IGNORECASE)
+    plain = re.sub(r"<[^>]+>", " ", without_style)
+    plain = re.sub(r"\s+", " ", plain)
+    return plain.strip()
+
+
+def _fetch_text_from_link(link: str) -> str:
+    req = request.Request(link, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with request.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+    except error.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to fetch text from link") from exc
+    except error.URLError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Link is unavailable") from exc
+
+    text = _clean_html_to_text(body)
+    if not text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No text could be extracted from link")
+    return text
+
+
+def _tokenize_semantic(text: str) -> list[str]:
+    return [token for token in re.findall(r"[a-z0-9]+", text.lower()) if len(token) > 1]
+
+
+def _term_frequencies(tokens: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for token in tokens:
+        counts[token] = counts.get(token, 0) + 1
+    return counts
+
+
+def _build_bm25_stats(documents: list[list[str]]) -> tuple[dict[str, int], float]:
+    document_frequencies: dict[str, int] = {}
+    for doc_tokens in documents:
+        for token in set(doc_tokens):
+            document_frequencies[token] = document_frequencies.get(token, 0) + 1
+    avg_doc_len = (sum(len(doc) for doc in documents) / len(documents)) if documents else 0.0
+    return document_frequencies, avg_doc_len
+
+
+def _bm25_term_score(
+    tf: int,
+    doc_len: int,
+    avg_doc_len: float,
+    doc_freq: int,
+    total_docs: int,
+    k1: float = 1.5,
+    b: float = 0.75,
+) -> float:
+    if tf <= 0 or total_docs <= 0:
+        return 0.0
+    idf = math.log(1 + ((total_docs - doc_freq + 0.5) / (doc_freq + 0.5)))
+    norm = k1 * (1 - b + (b * (doc_len / max(avg_doc_len, 1e-9))))
+    return idf * ((tf * (k1 + 1)) / (tf + norm))
+
+
+def _bm25_document_score(
+    query_tokens: list[str],
+    doc_tokens: list[str],
+    doc_freqs: dict[str, int],
+    avg_doc_len: float,
+    total_docs: int,
+) -> float:
+    if not query_tokens or not doc_tokens:
+        return 0.0
+    tf = _term_frequencies(doc_tokens)
+    score = 0.0
+    for token in query_tokens:
+        score += _bm25_term_score(
+            tf=tf.get(token, 0),
+            doc_len=len(doc_tokens),
+            avg_doc_len=avg_doc_len,
+            doc_freq=doc_freqs.get(token, 0),
+            total_docs=total_docs,
+        )
+    return score
+
+
+def _normalize_scores(raw_scores: list[float]) -> list[float]:
+    if not raw_scores:
+        return []
+    max_score = max(raw_scores)
+    if max_score <= 0:
+        return [0.0 for _ in raw_scores]
+    return [round(score / max_score, 4) for score in raw_scores]
+
+
+def _split_into_snippets(text: str) -> list[str]:
+    if not text.strip():
+        return []
+    parts = re.split(r"(?<=[\.\!\?])\s+|\n+", text)
+    snippets = [part.strip() for part in parts if part and part.strip()]
+    return snippets
+
+
+def _compact_snippet(snippet: str, max_len: int = 320) -> str:
+    cleaned = re.sub(r"\s+", " ", snippet).strip()
+    if len(cleaned) <= max_len:
+        return cleaned
+    return f"{cleaned[:max_len].rstrip()}..."
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/summaries", response_model=SummaryResponse)
+def summarize_text(
+    payload: SummaryRequest,
+    current_user: User = Depends(get_current_user),
+):
+    del current_user
+    source = "text"
+    if payload.text and payload.text.strip():
+        source_text = payload.text.strip()
+    else:
+        assert payload.link is not None
+        source = "link"
+        source_text = _extract_text_from_context_link(payload.link, [item.model_dump() for item in payload.context]) or ""
+        if not source_text:
+            source_text = _fetch_text_from_link(payload.link)
+
+    prompt = (
+        "Create a concise and useful summary of the following text. "
+        "Keep it short and clear, focusing on main points.\n\n"
+        f"Text:\n{source_text}"
+    )
+    summary = generate_assistant_reply([], prompt)
+    return SummaryResponse(summary=summary, source=source)
+
+
+@app.post("/search/semantic", response_model=SemanticSearchResponse)
+def semantic_search(
+    payload: SemanticSearchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    notion_matches: list[SemanticNotionMatch] = []
+    chat_matches: list[SemanticChatMatch] = []
+    information_matches: list[SemanticInformationMatch] = []
+    query_tokens = _tokenize_semantic(payload.query)
+
+    if payload.include_notion:
+        integration = db.get(NotionIntegration, current_user.id)
+        if integration:
+            items = fetch_database_context(integration.api_key, integration.database_id, limit=payload.notion_limit)
+            title_weight = 2.5
+            property_weight = 1.4
+            description_weight = 0.9
+
+            title_docs: list[list[str]] = []
+            props_docs: list[list[str]] = []
+            desc_docs: list[list[str]] = []
+            for item in items:
+                properties = item.get("properties", {}) if isinstance(item.get("properties"), dict) else {}
+                title_docs.append(_tokenize_semantic(str(item.get("title", ""))))
+                props_parts = []
+                for key, value in properties.items():
+                    if key.lower() == "description":
+                        continue
+                    if value is not None:
+                        props_parts.append(str(value))
+                props_docs.append(_tokenize_semantic(" ".join(props_parts)))
+                desc_docs.append(_tokenize_semantic(str(properties.get("Description", ""))))
+
+            title_df, title_avg = _build_bm25_stats(title_docs)
+            props_df, props_avg = _build_bm25_stats(props_docs)
+            desc_df, desc_avg = _build_bm25_stats(desc_docs)
+
+            raw_scores: list[float] = []
+            for idx, _item in enumerate(items):
+                title_score = _bm25_document_score(query_tokens, title_docs[idx], title_df, title_avg, len(items))
+                props_score = _bm25_document_score(query_tokens, props_docs[idx], props_df, props_avg, len(items))
+                desc_score = _bm25_document_score(query_tokens, desc_docs[idx], desc_df, desc_avg, len(items))
+                raw_scores.append(
+                    (title_weight * title_score)
+                    + (property_weight * props_score)
+                    + (description_weight * desc_score)
+                )
+
+            normalized_scores = _normalize_scores(raw_scores)
+            scored_items: list[tuple[float, dict]] = []
+            for idx, item in enumerate(items):
+                score = normalized_scores[idx]
+                if score > 0:
+                    scored_items.append((score, item))
+            scored_items.sort(key=lambda pair: pair[0], reverse=True)
+            notion_matches = [
+                SemanticNotionMatch(score=score, item=item) for score, item in scored_items[: payload.top_k]
+            ]
+
+            snippet_entries: list[tuple[float, dict]] = []
+            for item in items:
+                properties = item.get("properties", {}) if isinstance(item.get("properties"), dict) else {}
+                source_id = str(item.get("id") or item.get("url") or "")
+                source_label = str(item.get("title", "")).strip() or "Notion item"
+                candidate_texts = [source_label]
+                candidate_texts.extend(str(v) for v in properties.values() if v is not None)
+                for candidate in candidate_texts:
+                    for snippet in _split_into_snippets(candidate):
+                        score = _bm25_document_score(
+                            query_tokens,
+                            _tokenize_semantic(snippet),
+                            *_build_bm25_stats([_tokenize_semantic(s) for s in _split_into_snippets(" ".join(candidate_texts))]),
+                            max(1, len(_split_into_snippets(" ".join(candidate_texts)))),
+                        )
+                        if score > 0:
+                            snippet_entries.append(
+                                (
+                                    score,
+                                    {
+                                        "source_type": "notion",
+                                        "source_id": source_id,
+                                        "source_label": source_label,
+                                        "snippet": snippet,
+                                    },
+                                )
+                            )
+            snippet_entries.sort(key=lambda pair: pair[0], reverse=True)
+            seen: set[tuple[str, str]] = set()
+            for score, info in snippet_entries:
+                compact = _compact_snippet(info["snippet"])
+                dedupe_key = (info["source_id"], compact.lower())
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                information_matches.append(
+                    SemanticInformationMatch(score=round(score, 4), snippet=compact, **{k: v for k, v in info.items() if k != "snippet"})
+                )
+                if len(information_matches) >= payload.top_k:
+                    break
+
+    if payload.include_chat_history:
+        if payload.chat_id:
+            chats = [get_user_chat_or_404(db, current_user.id, payload.chat_id)]
+        else:
+            chats = list(db.scalars(select(Chat).where(Chat.user_id == current_user.id)).all())
+
+        all_messages: list[Message] = []
+        for chat in chats:
+            all_messages.extend(chat.messages)
+
+        message_docs = [_tokenize_semantic(message.content) for message in all_messages]
+        message_df, message_avg = _build_bm25_stats(message_docs)
+        raw_message_scores = [
+            _bm25_document_score(query_tokens, doc_tokens, message_df, message_avg, len(message_docs))
+            for doc_tokens in message_docs
+        ]
+        normalized_message_scores = _normalize_scores(raw_message_scores)
+
+        scored_messages: list[tuple[float, Message]] = []
+        for idx, message in enumerate(all_messages):
+            score = normalized_message_scores[idx]
+            if score > 0:
+                scored_messages.append((score, message))
+        scored_messages.sort(key=lambda pair: pair[0], reverse=True)
+        chat_matches = [
+            SemanticChatMatch(score=score, message=message) for score, message in scored_messages[: payload.top_k]
+        ]
+
+        snippet_docs: list[list[str]] = []
+        snippet_meta: list[tuple[Message, str]] = []
+        for message in all_messages:
+            for snippet in _split_into_snippets(message.content):
+                snippet_docs.append(_tokenize_semantic(snippet))
+                snippet_meta.append((message, snippet))
+        snippet_df, snippet_avg = _build_bm25_stats(snippet_docs)
+        raw_snippet_scores = [
+            _bm25_document_score(query_tokens, doc_tokens, snippet_df, snippet_avg, len(snippet_docs))
+            for doc_tokens in snippet_docs
+        ]
+        normalized_snippet_scores = _normalize_scores(raw_snippet_scores)
+        for idx, score in enumerate(normalized_snippet_scores):
+            if score <= 0:
+                continue
+            message, snippet = snippet_meta[idx]
+            information_matches.append(
+                SemanticInformationMatch(
+                    score=score,
+                    source_type="chat",
+                    source_id=str(message.id),
+                    source_label=f"{message.role} message",
+                    snippet=_compact_snippet(snippet),
+                )
+            )
+
+    information_matches.sort(key=lambda match: match.score, reverse=True)
+    return SemanticSearchResponse(
+        query=payload.query,
+        notion_matches=notion_matches,
+        chat_matches=chat_matches,
+        information_matches=information_matches[: payload.top_k],
+    )
 
 
 @app.post("/auth/register", response_model=TokenResponse)

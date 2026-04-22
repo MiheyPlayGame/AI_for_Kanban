@@ -257,3 +257,240 @@ def test_decompose_task_from_notion_not_found(client: TestClient, monkeypatch):
     )
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Task not found in Notion context"
+
+
+def test_summarize_from_text(client: TestClient, monkeypatch):
+    token = client.post("/auth/register", json={"id": "summarizer", "password": "pass"}).json()["access_token"]
+    headers = auth_headers(token)
+
+    captured = {"prompt": ""}
+
+    def fake_generate(_history, prompt):
+        captured["prompt"] = prompt
+        return "Short summary"
+
+    monkeypatch.setattr("app.main.generate_assistant_reply", fake_generate)
+    response = client.post(
+        "/summaries",
+        headers=headers,
+        json={"text": "Long task details and progress notes."},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"summary": "Short summary", "source": "text"}
+    assert "Long task details" in captured["prompt"]
+
+
+def test_summarize_from_link_context(client: TestClient, monkeypatch):
+    token = client.post("/auth/register", json={"id": "summarizer2", "password": "pass"}).json()["access_token"]
+    headers = auth_headers(token)
+
+    captured = {"prompt": ""}
+
+    def fake_generate(_history, prompt):
+        captured["prompt"] = prompt
+        return "Context summary"
+
+    monkeypatch.setattr("app.main.generate_assistant_reply", fake_generate)
+    response = client.post(
+        "/summaries",
+        headers=headers,
+        json={
+            "link": "https://example.com/task-1",
+            "context": [
+                {
+                    "link": "https://example.com/task-1",
+                    "text": "This is context text for task one and should be summarized.",
+                }
+            ],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {"summary": "Context summary", "source": "link"}
+    assert "context text for task one" in captured["prompt"].lower()
+
+
+def test_summarize_requires_exactly_one_source(client: TestClient):
+    token = client.post("/auth/register", json={"id": "summarizer3", "password": "pass"}).json()["access_token"]
+    headers = auth_headers(token)
+
+    response = client.post("/summaries", headers=headers, json={"text": "a", "link": "https://example.com"})
+    assert response.status_code == 422
+
+
+def test_summarize_link_not_found_or_fetchable(client: TestClient):
+    token = client.post("/auth/register", json={"id": "summarizer4", "password": "pass"}).json()["access_token"]
+    headers = auth_headers(token)
+
+    response = client.post(
+        "/summaries",
+        headers=headers,
+        json={
+            "link": "https://127.0.0.1.invalid/nope",
+            "context": [{"link": "https://example.com/other", "text": "other text"}],
+        },
+    )
+    assert response.status_code in {400, 502}
+
+
+def test_semantic_search_returns_notion_and_chat_matches(client: TestClient, monkeypatch):
+    token = client.post("/auth/register", json={"id": "semantic_user", "password": "pass"}).json()["access_token"]
+    headers = auth_headers(token)
+    chat_id = client.post("/chats", headers=headers).json()["id"]
+
+    monkeypatch.setattr("app.main.validate_database_access", lambda _key, _db_id: None)
+    client.post(
+        "/integrations/notion/connect",
+        headers=headers,
+        json={"api_key": "secret_key", "database_id": "db_123"},
+    )
+    monkeypatch.setattr(
+        "app.main.fetch_database_context",
+        lambda _key, _db_id, limit=20: [
+            {
+                "id": "n1",
+                "url": "https://notion.so/n1",
+                "title": "Publish release notes",
+                "properties": {"Description": "Prepare release highlights and known issues section"},
+            },
+            {
+                "id": "n2",
+                "url": "https://notion.so/n2",
+                "title": "Refactor auth middleware",
+                "properties": {"Description": "Improve token parsing"},
+            },
+        ],
+    )
+
+    monkeypatch.setattr("app.main.generate_assistant_reply", lambda _history, _new: "assistant response")
+    client.post(
+        f"/chats/{chat_id}/messages",
+        headers=headers,
+        json={"content": "Need help drafting release notes for v2.3.0", "attachments": []},
+    )
+
+    response = client.post(
+        "/search/semantic",
+        headers=headers,
+        json={"query": "release notes", "chat_id": chat_id, "top_k": 3},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["query"] == "release notes"
+    assert body["notion_matches"][0]["item"]["title"] == "Publish release notes"
+    assert "release notes" in body["chat_matches"][0]["message"]["content"].lower()
+    assert len(body["information_matches"]) >= 1
+    assert body["information_matches"][0]["source_type"] in {"notion", "chat"}
+
+
+def test_semantic_search_chat_only_without_notion(client: TestClient):
+    token = client.post("/auth/register", json={"id": "semantic_user2", "password": "pass"}).json()["access_token"]
+    headers = auth_headers(token)
+    chat_id = client.post("/chats", headers=headers).json()["id"]
+    client.post(
+        f"/chats/{chat_id}/messages",
+        headers=headers,
+        json={"content": "Discuss API pagination strategy", "attachments": []},
+    )
+
+    response = client.post(
+        "/search/semantic",
+        headers=headers,
+        json={"query": "pagination", "include_notion": False, "top_k": 2},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["notion_matches"] == []
+    assert len(body["chat_matches"]) >= 1
+
+
+def test_semantic_search_invalid_chat_id_for_user(client: TestClient):
+    token_a = client.post("/auth/register", json={"id": "semantic_a", "password": "pass"}).json()["access_token"]
+    token_b = client.post("/auth/register", json={"id": "semantic_b", "password": "pass"}).json()["access_token"]
+    chat_id_b = client.post("/chats", headers=auth_headers(token_b)).json()["id"]
+
+    response = client.post(
+        "/search/semantic",
+        headers=auth_headers(token_a),
+        json={"query": "anything", "chat_id": chat_id_b},
+    )
+    assert response.status_code == 404
+
+
+def test_semantic_search_bm25_prefers_document_update_task(client: TestClient, monkeypatch):
+    token = client.post("/auth/register", json={"id": "semantic_user3", "password": "pass"}).json()["access_token"]
+    headers = auth_headers(token)
+
+    monkeypatch.setattr("app.main.validate_database_access", lambda _key, _db_id: None)
+    client.post(
+        "/integrations/notion/connect",
+        headers=headers,
+        json={"api_key": "secret_key", "database_id": "db_123"},
+    )
+    monkeypatch.setattr(
+        "app.main.fetch_database_context",
+        lambda _key, _db_id, limit=20: [
+            {
+                "id": "n1",
+                "url": "https://notion.so/n1",
+                "title": "Publish release notes",
+                "properties": {
+                    "Priority": "Low",
+                    "Description": "very long generic text with many words but little about documents updates",
+                },
+            },
+            {
+                "id": "n2",
+                "url": "https://notion.so/n2",
+                "title": "Update help center & FAQ",
+                "properties": {
+                    "Priority": "Medium",
+                    "Description": "Update support documents to reflect new product releases.",
+                },
+            },
+        ],
+    )
+
+    response = client.post(
+        "/search/semantic",
+        headers=headers,
+        json={"query": "in which task we need to update documents?", "include_chat_history": False, "top_k": 2},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["notion_matches"][0]["item"]["title"] == "Update help center & FAQ"
+
+
+def test_semantic_search_information_match_returns_relevant_snippet(client: TestClient, monkeypatch):
+    token = client.post("/auth/register", json={"id": "semantic_user4", "password": "pass"}).json()["access_token"]
+    headers = auth_headers(token)
+
+    monkeypatch.setattr("app.main.validate_database_access", lambda _key, _db_id: None)
+    client.post(
+        "/integrations/notion/connect",
+        headers=headers,
+        json={"api_key": "secret_key", "database_id": "db_123"},
+    )
+    monkeypatch.setattr(
+        "app.main.fetch_database_context",
+        lambda _key, _db_id, limit=20: [
+            {
+                "id": "n1",
+                "url": "https://notion.so/n1",
+                "title": "Publish release notes",
+                "properties": {
+                    "Description": "Send for review, but publish anyway if nobody responds.",
+                },
+            }
+        ],
+    )
+
+    response = client.post(
+        "/search/semantic",
+        headers=headers,
+        json={"query": "publish anyway", "include_chat_history": False},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["information_matches"]) >= 1
+    snippets = [item["snippet"].lower() for item in body["information_matches"]]
+    assert any("publish anyway" in snippet for snippet in snippets)

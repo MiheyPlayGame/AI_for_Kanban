@@ -10,7 +10,9 @@ class Settings(BaseSettings):
     refresh_token_minutes: int = 60 * 24 * 7
 
     hf_token: str = ""
-    hf_model: str = "HuggingFaceH4/zephyr-7b-beta"
+    hf_model: str = "google/gemma-2-9b-it"
+    hf_inference_provider: str = ""
+    hf_local_transformers: bool = False
     notion_client_id: str = ""
     notion_client_secret: str = ""
     notion_redirect_uri: str = ""
