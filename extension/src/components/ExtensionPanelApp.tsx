@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { browser } from "wxt/browser";
+import { AuthPasswordEyeIcon } from "./AuthPasswordEyeIcon";
 import {
   checkHealth,
   connectApi,
@@ -22,9 +23,14 @@ type ChatMessage = {
   content: string;
 };
 
-export default function ExtensionPanelApp() {
+type ExtensionPanelAppProps = {
+  /** When true, the panel starts open (used by the Vite preview page, not the content script). */
+  initialOpen?: boolean;
+};
+
+export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPanelAppProps) {
   const panelRef = React.useRef<HTMLElement | null>(null);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initialOpen);
   const [backendReady, setBackendReady] = useState(false);
   const [bootstrapping, setBootstrapping] = useState(true);
   const [tokens, setTokens] = useState<Tokens | null>(null);
@@ -33,13 +39,17 @@ export default function ExtensionPanelApp() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [authMode, setAuthMode] = useState<"register" | "login">("login");
-  const [showPassword, setShowPassword] = useState(false);
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [showRegisterPassword, setShowRegisterPassword] = useState(false);
+  const [showRegisterConfirm, setShowRegisterConfirm] = useState(false);
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [credentials, setCredentials] = useState({ id: "", password: "" });
   const [connectExpanded, setConnectExpanded] = useState(false);
   const [apiConfig, setApiConfig] = useState({ apiKey: "", databaseId: "" });
   const [decomposeTitle, setDecomposeTitle] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [authNotice, setAuthNotice] = useState("");
   const [panelSize, setPanelSize] = useState<{ width?: number; height?: number }>({});
 
   const isAuthenticated = Boolean(tokens?.access_token);
@@ -198,9 +208,16 @@ export default function ExtensionPanelApp() {
       setError("Enter user id and password.");
       return;
     }
+    if (authMode === "register") {
+      if (confirmPassword !== password) {
+        setError("Passwords do not match.");
+        return;
+      }
+    }
 
     setLoading(true);
     setError("");
+    setAuthNotice("");
     try {
       const tokenPayload =
         authMode === "register" ? await register(userId, password) : await login(userId, password);
@@ -208,6 +225,7 @@ export default function ExtensionPanelApp() {
       await ensureChat(tokenPayload.access_token);
       setPanelMode("home");
       setCredentials({ id: userId, password: "" });
+      setConfirmPassword("");
     } catch (e: any) {
       setError(e?.message || "Authorization failed.");
     } finally {
@@ -299,6 +317,34 @@ export default function ExtensionPanelApp() {
     }
   }
 
+  function handleLogout() {
+    setTokens(null);
+    setChatId(null);
+    setMessages([]);
+    setDraft("");
+    setPanelMode("home");
+    setConnectExpanded(false);
+    setDecomposeTitle("");
+    setError("");
+    setAuthNotice("");
+    setAuthMode("login");
+    setCredentials({ id: "", password: "" });
+    setConfirmPassword("");
+    setShowLoginPassword(false);
+    setShowRegisterPassword(false);
+    setShowRegisterConfirm(false);
+  }
+
+  function switchAuthMode(next: "register" | "login") {
+    setAuthMode(next);
+    setError("");
+    setAuthNotice("");
+    setConfirmPassword("");
+    setShowLoginPassword(false);
+    setShowRegisterPassword(false);
+    setShowRegisterConfirm(false);
+  }
+
   return (
     <div className={`kanban-ai-ext ${open ? "open" : "closed"}`}>
       {open ? (
@@ -307,9 +353,14 @@ export default function ExtensionPanelApp() {
             <h1>AS.YA</h1>
             <div className="ext-actions">
               {isAuthenticated ? (
-                <button className="btn-primary" onClick={handleCreateChat} disabled={loading}>
-                  New Chat
-                </button>
+                <>
+                  <button className="btn-primary" onClick={handleCreateChat} disabled={loading}>
+                    New Chat
+                  </button>
+                  <button type="button" className="btn-logout" onClick={handleLogout} disabled={loading}>
+                    Logout
+                  </button>
+                </>
               ) : null}
               <button type="button" className="btn-close" onClick={() => setOpen(false)}>
                 x
@@ -323,63 +374,174 @@ export default function ExtensionPanelApp() {
           {bootstrapping ? <p className="chat-hint">Loading saved session...</p> : null}
 
           {!isAuthenticated && !bootstrapping ? (
-            <form className="auth-form" onSubmit={handleAuth}>
-              <div className="auth-brand">
-                <h2 className="assistant-title">{authMode === "register" ? "Create account" : "Login to AS.YA"}</h2>
-                <p className="chat-hint">
-                  {authMode === "register"
-                    ? "Create your account to keep chats and actions synced."
-                    : "Use your account to access chat, decompose, and API actions."}
-                </p>
-              </div>
-              <div className="auth-input-shell">
-                <input
-                  className="hero-chat-input auth-input"
-                  value={credentials.id}
-                  onChange={(event) => setCredentials((prev) => ({ ...prev, id: event.target.value }))}
-                  placeholder="Email or username"
-                  disabled={loading}
-                />
-              </div>
-              <div className="auth-input-shell auth-password-shell">
-                <input
-                  className="hero-chat-input auth-input"
-                  type={showPassword ? "text" : "password"}
-                  value={credentials.password}
-                  onChange={(event) => setCredentials((prev) => ({ ...prev, password: event.target.value }))}
-                  placeholder="Password"
-                  disabled={loading}
-                />
-                <button
-                  type="button"
-                  className="auth-eye"
-                  onClick={() => setShowPassword((prev) => !prev)}
-                  aria-label={showPassword ? "Hide password" : "Show password"}
+            <form className="auth-form auth-form-figma" onSubmit={handleAuth}>
+              <div className="auth-card">
+                <h2 className="auth-title">
+                  {authMode === "register" ? "Create an account" : "Sign in to AS.YA"}
+                </h2>
+                <p className="auth-lede">Use your account to access chat, decompose, and API actions.</p>
+
+                <div
+                  className={`auth-fields ${authMode === "register" ? "auth-fields--register" : "auth-fields--login"}`}
                 >
-                  {showPassword ? "Hide" : "Show"}
+                  {authMode === "register" ? (
+                    <div className="auth-field">
+                      <label className="auth-field-label" htmlFor="kanban-auth-id">
+                        Email or username
+                      </label>
+                      <input
+                        id="kanban-auth-id"
+                        className="auth-field-input"
+                        value={credentials.id}
+                        onChange={(event) => setCredentials((prev) => ({ ...prev, id: event.target.value }))}
+                        placeholder="example@text.com"
+                        autoComplete="username"
+                        disabled={loading}
+                      />
+                    </div>
+                  ) : (
+                    <div className="auth-field auth-field-plain">
+                      <div className="auth-field-input-wrap">
+                        <input
+                          id="kanban-auth-id"
+                          className="auth-field-input"
+                          value={credentials.id}
+                          onChange={(event) => setCredentials((prev) => ({ ...prev, id: event.target.value }))}
+                          placeholder="Email address or username"
+                          autoComplete="username"
+                          disabled={loading}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {authMode === "register" ? (
+                    <div className="auth-field">
+                      <label className="auth-field-label" htmlFor="kanban-auth-password">
+                        Create password
+                      </label>
+                      <div className="auth-field-input-wrap">
+                        <input
+                          id="kanban-auth-password"
+                          className="auth-field-input auth-field-input--padded"
+                          type={showRegisterPassword ? "text" : "password"}
+                          value={credentials.password}
+                          onChange={(event) => setCredentials((prev) => ({ ...prev, password: event.target.value }))}
+                          placeholder="Password"
+                          autoComplete="new-password"
+                          disabled={loading}
+                        />
+                        <button
+                          type="button"
+                          className="auth-password-toggle"
+                          onClick={() => setShowRegisterPassword((prev) => !prev)}
+                          aria-label={showRegisterPassword ? "Hide password" : "Show password"}
+                          disabled={loading}
+                        >
+                          <AuthPasswordEyeIcon revealed={showRegisterPassword} />
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="auth-field auth-field-plain">
+                      <div className="auth-field-input-wrap">
+                        <input
+                          id="kanban-auth-password"
+                          className="auth-field-input auth-field-input--padded"
+                          type={showLoginPassword ? "text" : "password"}
+                          value={credentials.password}
+                          onChange={(event) => setCredentials((prev) => ({ ...prev, password: event.target.value }))}
+                          placeholder="Password"
+                          autoComplete="current-password"
+                          disabled={loading}
+                        />
+                        <button
+                          type="button"
+                          className="auth-password-toggle"
+                          onClick={() => setShowLoginPassword((prev) => !prev)}
+                          aria-label={showLoginPassword ? "Hide password" : "Show password"}
+                          disabled={loading}
+                        >
+                          <AuthPasswordEyeIcon revealed={showLoginPassword} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {authMode === "register" ? (
+                    <div className="auth-field">
+                      <label className="auth-field-label" htmlFor="kanban-auth-confirm">
+                        Confirm password
+                      </label>
+                      <div className="auth-field-input-wrap">
+                        <input
+                          id="kanban-auth-confirm"
+                          className="auth-field-input auth-field-input--padded"
+                          type={showRegisterConfirm ? "text" : "password"}
+                          value={confirmPassword}
+                          onChange={(event) => setConfirmPassword(event.target.value)}
+                          placeholder="Confirm password"
+                          autoComplete="new-password"
+                          disabled={loading}
+                        />
+                        <button
+                          type="button"
+                          className="auth-password-toggle"
+                          onClick={() => setShowRegisterConfirm((prev) => !prev)}
+                          aria-label={showRegisterConfirm ? "Hide password" : "Show password"}
+                          disabled={loading}
+                        >
+                          <AuthPasswordEyeIcon revealed={showRegisterConfirm} />
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+
+                <button className="auth-cta" type="submit" disabled={loading}>
+                  {authMode === "register" ? "Get started" : "Log in"}
                 </button>
+
+                {authMode === "login" ? (
+                  <>
+                    <button
+                      type="button"
+                      className="auth-forgot-link"
+                      onClick={() => setAuthNotice("Password reset is not available yet.")}
+                      disabled={loading}
+                    >
+                      Forgot password?
+                    </button>
+                    {authNotice ? <p className="auth-inline-notice">{authNotice}</p> : null}
+                  </>
+                ) : null}
+
+                {authMode === "login" ? (
+                  <p className="auth-footer-line">
+                    <span className="auth-footer-muted">Don&apos;t have an account? </span>
+                    <button
+                      type="button"
+                      className="auth-footer-link"
+                      onClick={() => switchAuthMode("register")}
+                      disabled={loading}
+                    >
+                      Sign up
+                    </button>
+                  </p>
+                ) : (
+                  <p className="auth-footer-line auth-footer-line--register">
+                    <span className="auth-footer-muted">Already have an account? </span>
+                    <button
+                      type="button"
+                      className="auth-footer-link"
+                      onClick={() => switchAuthMode("login")}
+                      disabled={loading}
+                    >
+                      Sign in
+                    </button>
+                  </p>
+                )}
               </div>
-              <button className="btn-primary btn-auth-main" type="submit" disabled={loading}>
-                {authMode === "register" ? "Sign up" : "Log in"}
-              </button>
-              <button type="button" className="auth-link auth-forgot" disabled>
-                Forgot password?
-              </button>
-              {authMode === "login" ? (
-                <p className="auth-switch-line">
-                  Don't have an account?{" "}
-                  <button type="button" className="auth-link" onClick={() => setAuthMode("register")} disabled={loading}>
-                    Sign up
-                  </button>
-                </p>
-              ) : (
-                <p className="auth-switch-line">
-                  Already have an account?{" "}
-                  <button type="button" className="auth-link" onClick={() => setAuthMode("login")} disabled={loading}>
-                    Log in
-                  </button>
-                </p>
-              )}
             </form>
           ) : null}
 

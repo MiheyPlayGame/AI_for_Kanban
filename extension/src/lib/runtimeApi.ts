@@ -1,3 +1,5 @@
+import { browser } from "wxt/browser";
+
 export type Tokens = {
   access_token: string;
   refresh_token: string;
