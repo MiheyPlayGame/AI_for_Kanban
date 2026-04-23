@@ -6,7 +6,7 @@ import ExtensionPanelApp from "../../src/components/ExtensionPanelApp";
 import "../../src/styles/panel.css";
 
 export default defineContentScript({
-  matches: ["*://*/*"],
+  matches: ["<all_urls>"],
   runAt: "document_idle",
   main() {
     const rootId = "kanban-ai-extension-root";

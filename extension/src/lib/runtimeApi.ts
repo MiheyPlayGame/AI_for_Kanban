@@ -1,16 +1,18 @@
+import { browser } from "wxt/browser";
+
 export type Tokens = {
   access_token: string;
   refresh_token: string;
   token_type: string;
 };
 
-async function sendRuntimeMessage<T = any>(payload: Record<string, any>): Promise<T> {
-  const response = await browser.runtime.sendMessage(payload);
-  if (response?.__error) {
-    throw new Error(response.__error);
-  }
-  return response as T;
-}
+export type PanelMode = "home" | "chat";
+
+export type StoredSession = {
+  tokens: Tokens | null;
+  activeChatId: string | null;
+  panelMode: PanelMode;
+};
 
 export function checkHealth() {
   return sendRuntimeMessage({ type: "health" });
@@ -41,5 +43,31 @@ export function sendMessage(accessToken: string, chatId: string, content: string
 }
 
 export function saveTokens(tokens: Tokens | null) {
-  return sendRuntimeMessage({ type: "saveTokens", tokens });
+  return browser.runtime.sendMessage({ type: "saveTokens", tokens });
+}
+
+export function loadSession(): Promise<StoredSession> {
+  return browser.runtime.sendMessage({ type: "loadSession" });
+}
+
+export function saveSession(session: Partial<StoredSession>) {
+  return browser.runtime.sendMessage({ type: "saveSession", session });
+}
+
+export function connectApi(accessToken: string, apiKey: string, databaseId: string) {
+  return browser.runtime.sendMessage({
+    type: "connectApi",
+    accessToken,
+    apiKey,
+    databaseId
+  });
+}
+
+export function runDecompose(accessToken: string, chatId: string, taskTitle: string) {
+  return browser.runtime.sendMessage({
+    type: "decomposeTask",
+    accessToken,
+    chatId,
+    taskTitle
+  });
 }

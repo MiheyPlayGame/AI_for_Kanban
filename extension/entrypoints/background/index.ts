@@ -17,37 +17,11 @@ type RuntimeMessage =
   | { type: "listChats"; accessToken: string }
   | { type: "getMessages"; accessToken: string; chatId: string }
   | { type: "sendMessage"; accessToken: string; chatId: string; content: string }
-  | { type: "saveTokens"; tokens: Tokens | null };
-
-type RuntimeResponse = {
-  ok?: boolean;
-  __error?: string;
-  [key: string]: any;
-};
-
-function normalizeApiBaseUrl(rawValue?: string) {
-  if (!rawValue || typeof rawValue !== "string") {
-    return DEFAULT_API_BASE_URL;
-  }
-
-  // Fix common typo like localhost//8000 and trim trailing slash.
-  const prepared = rawValue
-    .replace("localhost//", "localhost:")
-    .replace(/\/+$/, "")
-    .trim();
-
-  if (!prepared) {
-    return DEFAULT_API_BASE_URL;
-  }
-
-  try {
-    const withProtocol = prepared.includes("://") ? prepared : `http://${prepared}`;
-    const url = new URL(withProtocol);
-    return `${url.protocol}//${url.host}`;
-  } catch {
-    return DEFAULT_API_BASE_URL;
-  }
-}
+  | { type: "saveTokens"; tokens: Tokens | null }
+  | { type: "loadSession" }
+  | { type: "saveSession"; session: { tokens?: Tokens | null; activeChatId?: string | null; panelMode?: "home" | "chat" } }
+  | { type: "connectApi"; accessToken: string; apiKey: string; databaseId: string }
+  | { type: "decomposeTask"; accessToken: string; chatId: string; taskTitle: string };
 
 async function getApiBaseUrl() {
   const config = await browser.storage.local.get("apiBaseUrl");
@@ -124,13 +98,18 @@ export default defineBackground(() => {
   }
 
   browser.runtime.onInstalled.addListener(async () => {
-    const storage = await browser.storage.local.get(["apiBaseUrl", "tokens"]);
-    const normalizedApiBaseUrl = normalizeApiBaseUrl(storage.apiBaseUrl as string | undefined);
-    if (storage.apiBaseUrl !== normalizedApiBaseUrl) {
-      await browser.storage.local.set({ apiBaseUrl: normalizedApiBaseUrl });
+    const storage = await browser.storage.local.get(["apiBaseUrl", "tokens", "activeChatId", "panelMode"]);
+    if (!storage.apiBaseUrl) {
+      await browser.storage.local.set({ apiBaseUrl: DEFAULT_API_BASE_URL });
     }
     if (!storage.tokens) {
       await browser.storage.local.set({ tokens: null });
+    }
+    if (!("activeChatId" in storage)) {
+      await browser.storage.local.set({ activeChatId: null });
+    }
+    if (!storage.panelMode) {
+      await browser.storage.local.set({ panelMode: "home" });
     }
   });
 
@@ -189,8 +168,34 @@ export default defineBackground(() => {
           return;
         case "saveTokens":
           await browser.storage.local.set({ tokens: message.tokens });
-          sendResponse({ ok: true });
-          return;
+          return { ok: true };
+        case "loadSession": {
+          const storage = await browser.storage.local.get(["tokens", "activeChatId", "panelMode"]);
+          return {
+            tokens: (storage.tokens as Tokens | null) || null,
+            activeChatId: (storage.activeChatId as string | null) || null,
+            panelMode: storage.panelMode === "chat" ? "chat" : "home"
+          };
+        }
+        case "saveSession":
+          await browser.storage.local.set({
+            ...(message.session.tokens !== undefined ? { tokens: message.session.tokens } : {}),
+            ...(message.session.activeChatId !== undefined ? { activeChatId: message.session.activeChatId } : {}),
+            ...(message.session.panelMode !== undefined ? { panelMode: message.session.panelMode } : {})
+          });
+          return { ok: true };
+        case "connectApi":
+          return request("/integrations/notion/connect", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${message.accessToken}` },
+            body: JSON.stringify({ api_key: message.apiKey, database_id: message.databaseId })
+          });
+        case "decomposeTask":
+          return request("/tasks/decompose-from-notion", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${message.accessToken}` },
+            body: JSON.stringify({ chat_id: message.chatId, task_title: message.taskTitle })
+          });
         default:
           sendResponse({ ok: false });
       }
