@@ -3,6 +3,13 @@ import { defineBackground } from "wxt/utils/define-background";
 
 const DEFAULT_API_BASE_URL = "http://localhost:8000";
 
+function normalizeApiBaseUrl(input?: string) {
+  const trimmed = (input ?? "").trim();
+  const fallback = DEFAULT_API_BASE_URL;
+  const withValue = trimmed || fallback;
+  return withValue.replace(/\/+$/, "");
+}
+
 type Tokens = {
   access_token: string;
   refresh_token: string;
@@ -200,7 +207,7 @@ export default defineBackground(() => {
           sendResponse({ ok: false });
       }
     })().catch((error: any) => {
-      const payload: RuntimeResponse = { __error: error?.message || "Unknown extension runtime error." };
+      const payload = { __error: error?.message || "Unknown extension runtime error." };
       sendResponse(payload);
     });
 
