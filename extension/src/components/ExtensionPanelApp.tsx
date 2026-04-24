@@ -6,15 +6,19 @@ import {
   connectApi,
   createChat,
   findInText,
+  getNotionStatus,
   getMessages,
+  listNotionContext,
   listNotionDatabases,
   loadSession,
   listChats,
   login,
+  type NotionContextItem,
   register,
   runDecompose,
   saveSession,
   sendMessage,
+  startNotionOAuth,
   summarizeText,
   type NotionDatabaseEntry,
   type PanelMode,
@@ -27,7 +31,7 @@ type ChatMessage = {
   content: string;
 };
 
-type QuickAction = "summarize" | "decompose" | "find";
+type QuickAction = "chat" | "summarize" | "decompose" | "find";
 
 type ExtensionPanelAppProps = {
   initialOpen?: boolean;
@@ -42,20 +46,22 @@ function makeLocalMessage(role: "user" | "assistant", content: string): ChatMess
 }
 
 function formatFindResponse(payload: any) {
+  const answer = (payload?.answer || "").toString().trim();
   const notion = Array.isArray(payload?.notion_matches) ? payload.notion_matches : [];
-  const chat = Array.isArray(payload?.chat_matches) ? payload.chat_matches : [];
   const info = Array.isArray(payload?.information_matches) ? payload.information_matches : [];
-  if (notion.length === 0 && chat.length === 0 && info.length === 0) {
+  if (!answer && notion.length === 0 && info.length === 0) {
     return "No matches found.";
   }
-  const lines: string[] = ["Found relevant results:"];
+  const lines: string[] = [];
+  if (answer) {
+    lines.push(answer);
+    return lines.join("\n");
+  }
+  lines.push("Found relevant results:");
   notion.slice(0, 3).forEach((item: any, index: number) => {
     lines.push(`${index + 1}. ${item?.item?.title || "Untitled Notion item"}`);
   });
-  chat.slice(0, 2).forEach((item: any) => {
-    lines.push(`Chat: ${(item?.message?.content || "").slice(0, 120)}`);
-  });
-  info.slice(0, 2).forEach((item: any) => {
+  info.slice(0, 1).forEach((item: any) => {
     lines.push(`${item?.source_label || "Info"}: ${(item?.snippet || "").slice(0, 120)}`);
   });
   return lines.join("\n");
@@ -86,7 +92,7 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
   const [chatId, setChatId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
-  const [quickAction, setQuickAction] = useState<QuickAction>("summarize");
+  const [quickAction, setQuickAction] = useState<QuickAction>("chat");
   const [authMode, setAuthMode] = useState<"register" | "login">("login");
   const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [showRegisterPassword, setShowRegisterPassword] = useState(false);
@@ -95,6 +101,8 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
   const [credentials, setCredentials] = useState({ id: "", password: "" });
   const [apiConfig, setApiConfig] = useState({ apiKey: "", databaseId: "" });
   const [notionDatabases, setNotionDatabases] = useState<NotionDatabaseEntry[]>([]);
+  const [notionTasks, setNotionTasks] = useState<NotionContextItem[]>([]);
+  const [selectedDecomposeTaskId, setSelectedDecomposeTaskId] = useState("");
   const [notionConnected, setNotionConnected] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -173,6 +181,8 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
   useEffect(() => {
     if (!tokens?.access_token) {
       setNotionDatabases([]);
+      setNotionTasks([]);
+      setSelectedDecomposeTaskId("");
       return;
     }
     withTimeout(listNotionDatabases(tokens.access_token), 5000)
@@ -189,6 +199,34 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
         setNotionDatabases([]);
       });
   }, [tokens?.access_token]);
+
+  useEffect(() => {
+    if (!tokens?.access_token || !notionConnected) {
+      setNotionTasks([]);
+      setSelectedDecomposeTaskId("");
+      return;
+    }
+    withTimeout(listNotionContext(tokens.access_token, 40), 6000)
+      .then((payload) => {
+        const items = (Array.isArray(payload?.items) ? payload.items : []).filter((item) =>
+          Boolean((item?.title || "").toString().trim())
+        );
+        setNotionTasks(items);
+        if (items.length === 0) {
+          setSelectedDecomposeTaskId("");
+          return;
+        }
+        setSelectedDecomposeTaskId((prev) => {
+          if (prev && items.some((item) => (item.id || "") === prev)) {
+            return prev;
+          }
+          return (items[0].id || "").toString();
+        });
+      })
+      .catch(() => {
+        setNotionTasks([]);
+      });
+  }, [tokens?.access_token, notionConnected]);
 
   useEffect(() => {
     let stopped = false;
@@ -329,6 +367,58 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
     }
   }
 
+  async function refreshNotionConnection(accessToken: string) {
+    const status = await getNotionStatus(accessToken);
+    setNotionConnected(Boolean(status?.connected));
+    if (!status?.connected) {
+      setNotionDatabases([]);
+      return;
+    }
+    const payload = await listNotionDatabases(accessToken);
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    setNotionDatabases(items);
+    const defaultDb = items.find((item) => item.is_default)?.database_id;
+    if (defaultDb) {
+      setApiConfig((prev) => ({ ...prev, databaseId: defaultDb }));
+    }
+  }
+
+  async function handleStartNotionOAuth() {
+    if (!tokens?.access_token) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    setAuthNotice("");
+    try {
+      const payload = await startNotionOAuth(tokens.access_token);
+      if (payload?.auth_url) {
+        window.open(payload.auth_url, "_blank", "noopener,noreferrer");
+      }
+      setAuthNotice("Notion OAuth opened in a new tab. Complete it, then click 'Check connection'.");
+    } catch (e: any) {
+      setError(e?.message || "Failed to start Notion OAuth.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleCheckNotionConnection() {
+    if (!tokens?.access_token) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      await refreshNotionConnection(tokens.access_token);
+      setAuthNotice("Notion connection status updated.");
+    } catch (e: any) {
+      setError(e?.message || "Failed to check Notion status.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function handleResetNotion() {
     setApiConfig({ apiKey: "", databaseId: "" });
     setNotionConnected(false);
@@ -337,26 +427,52 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
 
   async function handleQuickSubmit(event: React.FormEvent) {
     event.preventDefault();
-    if (!tokens?.access_token || !draft.trim()) {
+    if (!tokens?.access_token) {
       return;
     }
     const input = draft.trim();
+    const selectedTaskTitle =
+      quickAction === "decompose"
+        ? (notionTasks.find((item) => (item.id || "") === selectedDecomposeTaskId)?.title || "").trim()
+        : "";
+    if (quickAction !== "decompose" && !input) {
+      return;
+    }
+    if (quickAction === "decompose" && !selectedTaskTitle && !input) {
+      setError("Choose a Notion task or enter task title.");
+      return;
+    }
     setDraft("");
     setLoading(true);
     setError("");
     try {
       const activeChatId = await ensureChat(tokens.access_token);
       const actionTag =
-        quickAction === "summarize" ? "SUMMARIZE" : quickAction === "decompose" ? "DECOMPOSE" : "FIND IN TEXT";
-      const taggedPrompt = `[${actionTag}] ${input}`;
-      setMessages((prev) => [...prev, makeLocalMessage("user", taggedPrompt)]);
-      if (quickAction === "summarize") {
+        quickAction === "chat"
+          ? "CHAT"
+          : quickAction === "summarize"
+            ? "SUMMARIZE"
+            : quickAction === "decompose"
+              ? "DECOMPOSE"
+              : "FIND IN TEXT";
+      const effectiveInput = quickAction === "decompose" ? selectedTaskTitle || input : input;
+      const taggedPrompt = quickAction === "chat" ? effectiveInput : `[${actionTag}] ${effectiveInput}`;
+      if (quickAction === "chat") {
+        const payload = await sendMessage(tokens.access_token, activeChatId, input);
+        setMessages((prev) => [...prev, payload.user_message as ChatMessage, payload.assistant_message as ChatMessage]);
+      } else if (quickAction === "summarize") {
+        setMessages((prev) => [...prev, makeLocalMessage("user", taggedPrompt)]);
         const summary = await summarizeText(tokens.access_token, input);
         setMessages((prev) => [...prev, makeLocalMessage("assistant", summary.summary)]);
       } else if (quickAction === "decompose") {
-        const result = await runDecompose(tokens.access_token, activeChatId, input);
+        if (!effectiveInput) {
+          throw new Error("Choose a Notion task or enter task title.");
+        }
+        setMessages((prev) => [...prev, makeLocalMessage("user", taggedPrompt)]);
+        const result = await runDecompose(tokens.access_token, activeChatId, effectiveInput);
         setMessages((prev) => [...prev, result.assistant_message as ChatMessage]);
       } else {
+        setMessages((prev) => [...prev, makeLocalMessage("user", taggedPrompt)]);
         const result = await findInText(tokens.access_token, input, activeChatId);
         setMessages((prev) => [...prev, makeLocalMessage("assistant", formatFindResponse(result))]);
       }
@@ -579,6 +695,14 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
               <div className="quick-action-row">
                 <button
                   type="button"
+                  className={`action-item ${quickAction === "chat" ? "action-item-active" : ""}`}
+                  onClick={() => setQuickAction("chat")}
+                  disabled={loading}
+                >
+                  CHAT
+                </button>
+                <button
+                  type="button"
                   className={`action-item ${quickAction === "summarize" ? "action-item-active" : ""}`}
                   onClick={() => setQuickAction("summarize")}
                   disabled={loading}
@@ -604,11 +728,33 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
               </div>
               <form className="hero-chat-form" onSubmit={handleQuickSubmit}>
                 <div className="hero-chat-shell">
+                  {quickAction === "decompose" && notionTasks.length > 0 ? (
+                    <select
+                      className="hero-chat-input auth-input auth-select"
+                      value={selectedDecomposeTaskId}
+                      onChange={(event) => setSelectedDecomposeTaskId(event.target.value)}
+                      disabled={loading}
+                    >
+                      {notionTasks.map((item) => (
+                        <option key={item.id || item.title} value={(item.id || "").toString()}>
+                          {item.title || "Untitled task"}
+                        </option>
+                      ))}
+                    </select>
+                  ) : null}
                   <input
                     className="hero-chat-input"
                     value={draft}
                     onChange={(event) => setDraft(event.target.value)}
-                    placeholder="Start chatting..."
+                    placeholder={
+                      quickAction === "decompose"
+                        ? notionTasks.length > 0
+                          ? "Optional: enter task title manually"
+                          : "Enter task title from Notion"
+                        : quickAction === "chat"
+                          ? "Type your message..."
+                          : "Start chatting..."
+                    }
                     disabled={loading}
                   />
                   <div className="hero-chat-bottom">
@@ -616,7 +762,17 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
                       <span>{loading ? "Processing..." : `Mode: ${quickAction.toUpperCase()}`}</span>
                       <img src={arrowDownIconUrl} alt="" aria-hidden="true" className="input-state-icon" />
                     </span>
-                    <button className="send-btn" type="submit" disabled={loading || !draft.trim()}>
+                    <button
+                      className="send-btn"
+                      type="submit"
+                      disabled={
+                        loading ||
+                        (quickAction !== "decompose" && !draft.trim()) ||
+                        (quickAction === "decompose" &&
+                          !draft.trim() &&
+                          !(notionTasks.find((item) => (item.id || "") === selectedDecomposeTaskId)?.title || "").trim())
+                      }
+                    >
                       <img src={arrowUpCircleIconUrl} alt="Send" className="send-btn-icon" />
                     </button>
                   </div>
@@ -629,18 +785,19 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
             <>
               <h2 className="assistant-title">Settings</h2>
               <form className="connect-form" onSubmit={handleConnectApi}>
+                <div className="settings-buttons">
+                  <button className="btn-secondary" type="button" onClick={handleStartNotionOAuth} disabled={loading}>
+                    Connect via Notion OAuth
+                  </button>
+                  <button className="btn-secondary" type="button" onClick={handleCheckNotionConnection} disabled={loading}>
+                    Check connection
+                  </button>
+                </div>
                 <input
                   className="hero-chat-input auth-input"
                   value={apiConfig.apiKey}
                   onChange={(event) => setApiConfig((prev) => ({ ...prev, apiKey: event.target.value }))}
                   placeholder="Notion Internal Integration token (secret_...)"
-                  disabled={loading}
-                />
-                <input
-                  className="hero-chat-input auth-input"
-                  value={apiConfig.databaseId}
-                  onChange={(event) => setApiConfig((prev) => ({ ...prev, databaseId: event.target.value }))}
-                  placeholder="Notion Database ID (optional: choose default)"
                   disabled={loading}
                 />
                 {notionDatabases.length > 0 ? (
@@ -661,7 +818,7 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
                 ) : null}
                 <div className="settings-buttons">
                   <button className="btn-secondary" type="submit" disabled={loading}>
-                    Connect Notion API
+                    Connect with token (fallback)
                   </button>
                   <button className="btn-logout" type="button" onClick={handleResetNotion} disabled={loading}>
                     Reset Notion
@@ -672,9 +829,10 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
                 </div>
                 <p className="chat-hint">
                   {notionConnected
-                    ? "Notion API connected. All shared databases are available."
-                    : "Connect token to use all shared databases. Database ID is optional."}
+                    ? "Notion connected. All shared databases are available."
+                    : "Use OAuth first. Token connect is optional fallback."}
                 </p>
+                {authNotice ? <p className="chat-hint">{authNotice}</p> : null}
               </form>
             </>
           ) : null}

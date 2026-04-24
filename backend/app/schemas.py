@@ -98,7 +98,7 @@ class NotionDatabasesResponse(BaseModel):
 
 
 class NotionOAuthStartRequest(BaseModel):
-    database_id: str = Field(min_length=1, max_length=128)
+    database_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class NotionOAuthStartResponse(BaseModel):
@@ -107,7 +107,7 @@ class NotionOAuthStartResponse(BaseModel):
 
 class NotionOAuthCallbackResponse(BaseModel):
     connected: bool
-    database_id: str
+    database_id: str | None = None
 
 
 class NotionContextItem(BaseModel):
@@ -150,6 +150,7 @@ class SummaryRequest(BaseModel):
     text: str | None = None
     link: str | None = None
     context: list[SummaryContextItem] = Field(default_factory=list)
+    chat_id: UUID | None = None
 
     @model_validator(mode="after")
     def validate_source(self):
@@ -194,6 +195,7 @@ class SemanticInformationMatch(BaseModel):
 
 class SemanticSearchResponse(BaseModel):
     query: str
+    answer: str = ""
     notion_matches: list[SemanticNotionMatch] = Field(default_factory=list)
     chat_matches: list[SemanticChatMatch] = Field(default_factory=list)
     information_matches: list[SemanticInformationMatch] = Field(default_factory=list)

@@ -31,6 +31,9 @@ type RuntimeMessage =
       session: { tokens?: Tokens | null; activeChatId?: string | null; panelMode?: "home" | "chat" | "settings" };
     }
   | { type: "connectApi"; accessToken: string; apiKey: string; databaseId?: string }
+  | { type: "startNotionOAuth"; accessToken: string; databaseId?: string }
+  | { type: "getNotionStatus"; accessToken: string }
+  | { type: "listNotionContext"; accessToken: string; limit?: number }
   | { type: "decomposeTask"; accessToken: string; chatId: string; taskTitle: string }
   | { type: "summarizeText"; accessToken: string; text: string }
   | { type: "findInText"; accessToken: string; query: string; chatId?: string }
@@ -43,12 +46,13 @@ async function getApiBaseUrl() {
 
 async function request(path: string, options: RequestInit = {}) {
   const baseUrl = await getApiBaseUrl();
+  const mergedHeaders = {
+    "Content-Type": "application/json",
+    ...((options.headers || {}) as Record<string, string>)
+  };
   const response = await fetch(`${baseUrl}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {})
-    },
-    ...options
+    ...options,
+    headers: mergedHeaders
   });
 
   if (!response.ok) {
@@ -211,6 +215,27 @@ export default defineBackground(() => {
             })
           });
           break;
+        case "startNotionOAuth":
+          payload = await request("/integrations/notion/oauth/start", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${message.accessToken}` },
+            body: JSON.stringify({
+              ...(message.databaseId ? { database_id: message.databaseId } : {})
+            })
+          });
+          break;
+        case "getNotionStatus":
+          payload = await request("/integrations/notion/status", {
+            headers: { Authorization: `Bearer ${message.accessToken}` }
+          });
+          break;
+        case "listNotionContext": {
+          const qs = typeof message.limit === "number" ? `?limit=${Math.max(1, Math.min(100, Math.floor(message.limit)))}` : "";
+          payload = await request(`/integrations/notion/context${qs}`, {
+            headers: { Authorization: `Bearer ${message.accessToken}` }
+          });
+          break;
+        }
         case "decomposeTask":
           payload = await request("/tasks/decompose-from-notion", {
             method: "POST",

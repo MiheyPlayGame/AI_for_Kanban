@@ -2,6 +2,7 @@ import os
 import json
 import re
 import math
+from difflib import SequenceMatcher
 from uuid import UUID
 from urllib import error, request
 
@@ -55,6 +56,37 @@ from app.schemas import (
 )
 
 app = FastAPI(title="AI Assistant Backend")
+
+_SEMANTIC_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "do",
+    "for",
+    "from",
+    "have",
+    "how",
+    "i",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "to",
+    "what",
+    "which",
+    "with",
+    "you",
+    "your",
+}
 
 
 @app.on_event("startup")
@@ -120,7 +152,20 @@ def _fetch_text_from_link(link: str) -> str:
 
 
 def _tokenize_semantic(text: str) -> list[str]:
-    return [token for token in re.findall(r"[a-z0-9]+", text.lower()) if len(token) > 1]
+    def normalize(token: str) -> str:
+        base = token.lower().strip()
+        if len(base) > 4 and base.endswith("ing"):
+            base = base[:-3]
+        elif len(base) > 3 and base.endswith("ed"):
+            base = base[:-2]
+        elif len(base) > 3 and base.endswith("es"):
+            base = base[:-2]
+        elif len(base) > 2 and base.endswith("s"):
+            base = base[:-1]
+        return base
+
+    raw = re.findall(r"[a-z0-9]+", text.lower())
+    return [normalize(token) for token in raw if len(token) > 1 and token not in _SEMANTIC_STOP_WORDS]
 
 
 def _term_frequencies(tokens: list[str]) -> dict[str, int]:
@@ -201,6 +246,23 @@ def _compact_snippet(snippet: str, max_len: int = 320) -> str:
     return f"{cleaned[:max_len].rstrip()}..."
 
 
+def _is_semantic_internal_message(content: str) -> bool:
+    normalized = (content or "").strip().upper()
+    return (
+        normalized.startswith("[SEMANTIC SEARCH]")
+        or normalized.startswith("[SUMMARY]")
+        or normalized.startswith("[DECOMPOSE]")
+    )
+
+
+def _text_similarity(query: str, candidate: str) -> float:
+    query_value = (query or "").strip().lower()
+    candidate_value = (candidate or "").strip().lower()
+    if not query_value or not candidate_value:
+        return 0.0
+    return SequenceMatcher(None, query_value, candidate_value).ratio()
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -210,8 +272,8 @@ def health():
 def summarize_text(
     payload: SummaryRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    del current_user
     source = "text"
     if payload.text and payload.text.strip():
         source_text = payload.text.strip()
@@ -228,6 +290,11 @@ def summarize_text(
         f"Text:\n{source_text}"
     )
     summary = generate_assistant_reply([], prompt)
+    chat = get_or_create_user_chat(db, current_user.id, payload.chat_id)
+    user_marker = payload.text.strip() if payload.text else f"Summarize content from {payload.link}"
+    db.add(Message(chat_id=chat.id, role="user", content=f"[SUMMARY] {user_marker[:4000]}"))
+    db.add(Message(chat_id=chat.id, role="assistant", content=summary))
+    db.commit()
     return SummaryResponse(summary=summary, source=source)
 
 
@@ -242,6 +309,7 @@ def semantic_search(
     information_matches: list[SemanticInformationMatch] = []
     query_tokens = _tokenize_semantic(payload.query)
 
+    notion_items_raw: list[dict] = []
     if payload.include_notion:
         integration = db.get(NotionIntegration, current_user.id)
         if integration:
@@ -252,6 +320,7 @@ def semantic_search(
                     row["source_database_id"] = database_id
                 all_items.extend(scoped)
             items = all_items
+            notion_items_raw = items
             title_weight = 2.5
             property_weight = 1.4
             description_weight = 0.9
@@ -290,9 +359,18 @@ def semantic_search(
             scored_items: list[tuple[float, dict]] = []
             for idx, item in enumerate(items):
                 score = normalized_scores[idx]
+                title_similarity = _text_similarity(payload.query, str(item.get("title", "")))
+                properties = item.get("properties", {}) if isinstance(item.get("properties"), dict) else {}
+                properties_blob = " ".join(str(v) for v in properties.values() if v is not None)
+                properties_similarity = _text_similarity(payload.query, properties_blob)
+                score = round((0.75 * score) + (0.2 * title_similarity) + (0.05 * properties_similarity), 4)
                 if score > 0:
                     scored_items.append((score, item))
             scored_items.sort(key=lambda pair: pair[0], reverse=True)
+            if not scored_items and items:
+                # Broad/natural-language queries often have weak lexical overlap.
+                # Keep recall high by exposing available tasks instead of empty output.
+                scored_items = [(0.01, item) for item in items[: payload.top_k]]
             notion_matches = [
                 SemanticNotionMatch(score=score, item=item) for score, item in scored_items[: payload.top_k]
             ]
@@ -346,7 +424,13 @@ def semantic_search(
 
         all_messages: list[Message] = []
         for chat in chats:
-            all_messages.extend(chat.messages)
+            # Keep chat-history signal focused on user intent and avoid
+            # recursive retrieval of model-generated assistant text.
+            all_messages.extend(
+                message
+                for message in chat.messages
+                if message.role == "user" and not _is_semantic_internal_message(message.content)
+            )
 
         message_docs = [_tokenize_semantic(message.content) for message in all_messages]
         message_df, message_avg = _build_bm25_stats(message_docs)
@@ -392,12 +476,55 @@ def semantic_search(
                 )
             )
 
+    if not information_matches and notion_matches:
+        for match in notion_matches[: payload.top_k]:
+            title = (match.item.title or "").strip()
+            if not title:
+                continue
+            information_matches.append(
+                SemanticInformationMatch(
+                    score=max(match.score, 0.01),
+                    source_type="notion",
+                    source_id=match.item.id or match.item.url or title,
+                    source_label=title,
+                    snippet=title,
+                )
+            )
+
     information_matches.sort(key=lambda match: match.score, reverse=True)
+    top_information = information_matches[: payload.top_k]
+    semantic_prompt_lines = [
+        "Answer the user query using the retrieved evidence.",
+        f"Query: {payload.query}",
+        "",
+        "Evidence:",
+    ]
+    for idx, match in enumerate(top_information, start=1):
+        semantic_prompt_lines.append(f"{idx}. [{match.source_type}] {match.source_label}: {match.snippet}")
+    if not top_information:
+        semantic_prompt_lines.append("No relevant evidence found.")
+    semantic_answer = generate_assistant_reply([], "\n".join(semantic_prompt_lines)).strip()
+    if not semantic_answer:
+        if notion_matches:
+            titles = [match.item.title for match in notion_matches[:5] if match.item.title]
+            if titles:
+                semantic_answer = "Current tasks: " + "; ".join(titles) + "."
+        if not semantic_answer and chat_matches:
+            semantic_answer = "I found related items in chat history. Open evidence to review details."
+        if not semantic_answer:
+            semantic_answer = "I could not find relevant tasks for this query."
+
+    chat = get_or_create_user_chat(db, current_user.id, payload.chat_id)
+    db.add(Message(chat_id=chat.id, role="user", content=f"[SEMANTIC SEARCH] {payload.query}"))
+    db.add(Message(chat_id=chat.id, role="assistant", content=semantic_answer))
+    db.commit()
+
     return SemanticSearchResponse(
         query=payload.query,
+        answer=semantic_answer,
         notion_matches=notion_matches,
         chat_matches=chat_matches,
-        information_matches=information_matches[: payload.top_k],
+        information_matches=top_information,
     )
 
 
@@ -458,6 +585,18 @@ def get_user_chat_or_404(db: Session, user_id: str, chat_id: UUID) -> Chat:
     chat = db.scalar(stmt)
     if not chat:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    return chat
+
+
+def get_or_create_user_chat(db: Session, user_id: str, chat_id: UUID | None = None) -> Chat:
+    if chat_id:
+        return get_user_chat_or_404(db, user_id, chat_id)
+    existing_chat = db.scalar(select(Chat).where(Chat.user_id == user_id).order_by(Chat.id.asc()))
+    if existing_chat:
+        return existing_chat
+    chat = Chat(user_id=user_id)
+    db.add(chat)
+    db.flush()
     return chat
 
 
@@ -604,9 +743,31 @@ def connect_notion(
 
 @app.post("/integrations/notion/oauth/start", response_model=NotionOAuthStartResponse)
 def notion_oauth_start(
-    payload: NotionOAuthStartRequest,
+    payload_raw: object = Body(default={}),
     current_user: User = Depends(get_current_user),
 ):
+    payload_input: object = payload_raw
+    if payload_input is None:
+        payload_input = {}
+    if isinstance(payload_input, (bytes, bytearray)):
+        payload_input = payload_input.decode("utf-8", errors="ignore")
+    if isinstance(payload_input, str):
+        stripped = payload_input.strip()
+        if not stripped:
+            payload_input = {}
+        elif stripped.startswith("{") or stripped.startswith("["):
+            try:
+                payload_input = json.loads(stripped)
+            except json.JSONDecodeError:
+                payload_input = {}
+        else:
+            payload_input = {}
+    if not isinstance(payload_input, dict):
+        payload_input = {}
+    try:
+        payload = NotionOAuthStartRequest.model_validate(payload_input)
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.errors()) from exc
     state = build_oauth_state(
         user_id=current_user.id,
         database_id=payload.database_id,
@@ -618,19 +779,21 @@ def notion_oauth_start(
 @app.get("/integrations/notion/oauth/callback", response_model=NotionOAuthCallbackResponse)
 def notion_oauth_callback(code: str, state: str, db: Session = Depends(get_db)):
     user_id, database_id = parse_oauth_state(state)
-    normalized_database_id = _normalize_db_id(database_id)
+    normalized_database_id = _normalize_db_id(database_id) if database_id else None
     api_key = exchange_oauth_code(code)
-    validate_database_access(api_key, normalized_database_id)
+    if normalized_database_id:
+        validate_database_access(api_key, normalized_database_id)
     integration = db.get(NotionIntegration, user_id)
     if integration:
         integration.api_key = api_key
     else:
-        integration = NotionIntegration(user_id=user_id, api_key=api_key, database_id=normalized_database_id)
+        integration = NotionIntegration(user_id=user_id, api_key=api_key, database_id=normalized_database_id or "")
         db.add(integration)
         db.flush()
     _refresh_user_notion_databases(db, integration, preferred_database_id=normalized_database_id)
     db.commit()
-    return NotionOAuthCallbackResponse(connected=True, database_id=normalized_database_id)
+    default_db = next((row.database_id for row in integration.databases if row.is_default), None)
+    return NotionOAuthCallbackResponse(connected=True, database_id=default_db)
 
 
 @app.get("/integrations/notion/status", response_model=NotionStatusResponse)
@@ -710,6 +873,8 @@ def decompose_task_from_notion(
         "Return concise markdown with sections: Goal, Subtasks, Dependencies, Risks, Estimate.\n\n"
         f"Task: {json.dumps(source_task, ensure_ascii=True)}"
     )
+    db.add(Message(chat_id=chat.id, role="user", content=f"[DECOMPOSE] {payload.task_title or payload.task_id or ''}"))
+    db.flush()
     assistant_text = generate_assistant_reply(list(chat.messages), prompt)
     assistant_message = Message(chat_id=chat.id, role="assistant", content=assistant_text)
     db.add(assistant_message)

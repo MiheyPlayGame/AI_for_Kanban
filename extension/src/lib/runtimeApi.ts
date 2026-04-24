@@ -21,6 +21,7 @@ export type SummaryResponse = {
 
 export type SemanticSearchResponse = {
   query: string;
+  answer?: string;
   notion_matches: Array<{ score: number; item: { title: string; url?: string | null } }>;
   chat_matches: Array<{ score: number; message: { role: string; content: string } }>;
   information_matches: Array<{ score: number; source_label: string; snippet: string }>;
@@ -30,6 +31,18 @@ export type NotionDatabaseEntry = {
   database_id: string;
   title: string;
   is_default: boolean;
+};
+
+export type NotionStatusResponse = {
+  connected: boolean;
+  database_id?: string | null;
+};
+
+export type NotionContextItem = {
+  id?: string | null;
+  title?: string;
+  url?: string | null;
+  properties?: Record<string, string | number | boolean | null | string[]>;
 };
 
 async function sendRuntimeMessage<T = any>(payload: Record<string, any>): Promise<T> {
@@ -89,6 +102,21 @@ export function connectApi(accessToken: string, apiKey: string, databaseId?: str
   });
 }
 
+export function startNotionOAuth(accessToken: string, databaseId?: string) {
+  return sendRuntimeMessage<{ auth_url: string }>({
+    type: "startNotionOAuth",
+    accessToken,
+    ...(databaseId ? { databaseId } : {})
+  });
+}
+
+export function getNotionStatus(accessToken: string) {
+  return sendRuntimeMessage<NotionStatusResponse>({
+    type: "getNotionStatus",
+    accessToken
+  });
+}
+
 export function runDecompose(accessToken: string, chatId: string, taskTitle: string) {
   return sendRuntimeMessage({
     type: "decomposeTask",
@@ -119,5 +147,13 @@ export function listNotionDatabases(accessToken: string) {
   return sendRuntimeMessage<{ items: NotionDatabaseEntry[] }>({
     type: "listNotionDatabases",
     accessToken
+  });
+}
+
+export function listNotionContext(accessToken: string, limit = 30) {
+  return sendRuntimeMessage<{ items: NotionContextItem[] }>({
+    type: "listNotionContext",
+    accessToken,
+    limit
   });
 }

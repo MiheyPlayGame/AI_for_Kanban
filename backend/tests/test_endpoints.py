@@ -182,7 +182,7 @@ def test_notion_oauth_start_and_callback_flow(client: TestClient, monkeypatch):
     monkeypatch.setattr("app.main.exchange_oauth_code", lambda code: "oauth_token")
     monkeypatch.setattr("app.main.validate_database_access", lambda _key, _db_id: None)
 
-    start = client.post("/integrations/notion/oauth/start", headers=headers, json={"database_id": "db_777"})
+    start = client.post("/integrations/notion/oauth/start", headers=headers, json={})
     assert start.status_code == 200
     assert start.json()["auth_url"].endswith("state=state_123")
 
@@ -229,9 +229,10 @@ def test_decompose_task_from_notion_saves_assistant_message(client: TestClient, 
     history = client.get(f"/chats/{chat_id}/messages", headers=headers)
     assert history.status_code == 200
     messages = history.json()
-    assert len(messages) == 1
-    assert messages[0]["role"] == "assistant"
-    assert "Define routes" in messages[0]["content"]
+    assert len(messages) == 2
+    assert messages[0]["role"] == "user"
+    assert messages[1]["role"] == "assistant"
+    assert "Define routes" in messages[1]["content"]
 
 
 def test_decompose_task_from_notion_not_found(client: TestClient, monkeypatch):
@@ -278,6 +279,14 @@ def test_summarize_from_text(client: TestClient, monkeypatch):
     assert response.status_code == 200
     assert response.json() == {"summary": "Short summary", "source": "text"}
     assert "Long task details" in captured["prompt"]
+    chats = client.get("/chats", headers=headers).json()
+    assert len(chats) == 1
+    chat_id = chats[0]["id"]
+    history = client.get(f"/chats/{chat_id}/messages", headers=headers).json()
+    assert len(history) == 2
+    assert history[0]["role"] == "user"
+    assert history[1]["role"] == "assistant"
+    assert "Short summary" in history[1]["content"]
 
 
 def test_summarize_from_link_context(client: TestClient, monkeypatch):
@@ -382,7 +391,7 @@ def test_semantic_search_returns_notion_and_chat_matches(client: TestClient, mon
     assert body["information_matches"][0]["source_type"] in {"notion", "chat"}
 
 
-def test_semantic_search_chat_only_without_notion(client: TestClient):
+def test_semantic_search_chat_only_without_notion(client: TestClient, monkeypatch):
     token = client.post("/auth/register", json={"id": "semantic_user2", "password": "pass"}).json()["access_token"]
     headers = auth_headers(token)
     chat_id = client.post("/chats", headers=headers).json()["id"]
@@ -391,6 +400,7 @@ def test_semantic_search_chat_only_without_notion(client: TestClient):
         headers=headers,
         json={"content": "Discuss API pagination strategy", "attachments": []},
     )
+    monkeypatch.setattr("app.main.generate_assistant_reply", lambda _history, _new: "semantic response")
 
     response = client.post(
         "/search/semantic",
@@ -403,10 +413,11 @@ def test_semantic_search_chat_only_without_notion(client: TestClient):
     assert len(body["chat_matches"]) >= 1
 
 
-def test_semantic_search_invalid_chat_id_for_user(client: TestClient):
+def test_semantic_search_invalid_chat_id_for_user(client: TestClient, monkeypatch):
     token_a = client.post("/auth/register", json={"id": "semantic_a", "password": "pass"}).json()["access_token"]
     token_b = client.post("/auth/register", json={"id": "semantic_b", "password": "pass"}).json()["access_token"]
     chat_id_b = client.post("/chats", headers=auth_headers(token_b)).json()["id"]
+    monkeypatch.setattr("app.main.generate_assistant_reply", lambda _history, _new: "semantic response")
 
     response = client.post(
         "/search/semantic",
@@ -417,6 +428,7 @@ def test_semantic_search_invalid_chat_id_for_user(client: TestClient):
 
 
 def test_semantic_search_bm25_prefers_document_update_task(client: TestClient, monkeypatch):
+    monkeypatch.setattr("app.main.generate_assistant_reply", lambda _history, _new: "semantic response")
     token = client.post("/auth/register", json={"id": "semantic_user3", "password": "pass"}).json()["access_token"]
     headers = auth_headers(token)
 
@@ -461,6 +473,7 @@ def test_semantic_search_bm25_prefers_document_update_task(client: TestClient, m
 
 
 def test_semantic_search_information_match_returns_relevant_snippet(client: TestClient, monkeypatch):
+    monkeypatch.setattr("app.main.generate_assistant_reply", lambda _history, _new: "semantic response")
     token = client.post("/auth/register", json={"id": "semantic_user4", "password": "pass"}).json()["access_token"]
     headers = auth_headers(token)
 
