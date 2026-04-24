@@ -97,6 +97,26 @@ def fetch_database_context(api_key: str, database_id: str, limit: int = 20) -> l
     return result
 
 
+def list_accessible_databases(api_key: str, limit: int = 100) -> list[dict]:
+    raw = _notion_post(
+        api_key,
+        "search",
+        {
+            "filter": {"property": "object", "value": "database"},
+            "page_size": max(1, min(limit, 100)),
+        },
+    )
+    items: list[dict] = []
+    for db in raw.get("results", []):
+        db_id = str(db.get("id") or "")
+        if not db_id:
+            continue
+        title_chunks = db.get("title", []) if isinstance(db.get("title"), list) else []
+        title = "".join(chunk.get("plain_text", "") for chunk in title_chunks).strip()
+        items.append({"database_id": db_id, "title": title})
+    return items
+
+
 def find_task_in_context(
     items: list[dict],
     task_id: str | None = None,

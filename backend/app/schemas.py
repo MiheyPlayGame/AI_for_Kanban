@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 
 class RegisterRequest(BaseModel):
@@ -70,13 +70,31 @@ class AttachmentRead(BaseModel):
 
 
 class NotionConnectRequest(BaseModel):
-    api_key: str = Field(min_length=1)
-    database_id: str = Field(min_length=1, max_length=128)
+    api_key: str = Field(min_length=1, validation_alias=AliasChoices("api_key", "apiKey"))
+    database_id: str | None = Field(default=None, max_length=128, validation_alias=AliasChoices("database_id", "databaseId"))
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_input(cls, value):
+        # Accept raw token payloads sent as JSON string.
+        if isinstance(value, str):
+            return {"api_key": value.strip()}
+        return value
 
 
 class NotionStatusResponse(BaseModel):
     connected: bool
     database_id: str | None = None
+
+
+class NotionDatabaseEntry(BaseModel):
+    database_id: str
+    title: str = ""
+    is_default: bool = False
+
+
+class NotionDatabasesResponse(BaseModel):
+    items: list[NotionDatabaseEntry]
 
 
 class NotionOAuthStartRequest(BaseModel):

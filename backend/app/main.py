@@ -5,7 +5,8 @@ import math
 from uuid import UUID
 from urllib import error, request
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Body, Depends, FastAPI, HTTPException, status
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -14,13 +15,14 @@ from app.config import settings
 from app.database import Base, engine
 from app.deps import get_current_user, get_db
 from app.llm import generate_assistant_reply
-from app.models import Attachment, Chat, Message, NotionIntegration, User
+from app.models import Attachment, Chat, Message, NotionDatabase, NotionIntegration, User
 from app.notion import (
     build_oauth_authorize_url,
     build_oauth_state,
     exchange_oauth_code,
     fetch_database_context,
     find_task_in_context,
+    list_accessible_databases,
     parse_oauth_state,
     validate_database_access,
 )
@@ -30,6 +32,8 @@ from app.schemas import (
     MessageCreateRequest,
     MessageRead,
     NotionConnectRequest,
+    NotionDatabaseEntry,
+    NotionDatabasesResponse,
     NotionOAuthCallbackResponse,
     NotionOAuthStartRequest,
     NotionOAuthStartResponse,
@@ -241,7 +245,13 @@ def semantic_search(
     if payload.include_notion:
         integration = db.get(NotionIntegration, current_user.id)
         if integration:
-            items = fetch_database_context(integration.api_key, integration.database_id, limit=payload.notion_limit)
+            all_items: list[dict] = []
+            for database_id in _get_user_notion_database_ids(integration):
+                scoped = fetch_database_context(integration.api_key, database_id, limit=payload.notion_limit)
+                for row in scoped:
+                    row["source_database_id"] = database_id
+                all_items.extend(scoped)
+            items = all_items
             title_weight = 2.5
             property_weight = 1.4
             description_weight = 0.9
@@ -451,6 +461,84 @@ def get_user_chat_or_404(db: Session, user_id: str, chat_id: UUID) -> Chat:
     return chat
 
 
+def _normalize_db_id(value: str) -> str:
+    return value.replace("-", "").strip().lower()
+
+
+def _refresh_user_notion_databases(
+    db: Session,
+    integration: NotionIntegration,
+    preferred_database_id: str | None = None,
+) -> list[NotionDatabase]:
+    discovered: list[dict] = []
+    try:
+        discovered = list_accessible_databases(integration.api_key, limit=100)
+    except HTTPException:
+        # Backward-compatible fallback: keep working with explicitly provided DB
+        # even if listing accessible databases is temporarily unavailable.
+        if preferred_database_id:
+            discovered = [{"database_id": preferred_database_id, "title": ""}]
+        else:
+            raise
+    if not discovered:
+        if preferred_database_id:
+            discovered = [{"database_id": preferred_database_id, "title": ""}]
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No Notion databases found. Share at least one database with the integration.",
+            )
+
+    normalized_preferred = _normalize_db_id(preferred_database_id) if preferred_database_id else None
+    by_id: dict[str, NotionDatabase] = {item.database_id: item for item in integration.databases}
+    ordered_ids: list[str] = []
+    default_id: str | None = None
+
+    for idx, item in enumerate(discovered):
+        database_id = _normalize_db_id(str(item.get("database_id", "")))
+        if not database_id:
+            continue
+        title = str(item.get("title") or "").strip()
+        if database_id in by_id:
+            row = by_id[database_id]
+            row.title = title
+        else:
+            row = NotionDatabase(user_id=integration.user_id, database_id=database_id, title=title, is_default=False)
+            db.add(row)
+            integration.databases.append(row)
+            by_id[database_id] = row
+        ordered_ids.append(database_id)
+
+        if normalized_preferred and database_id == normalized_preferred:
+            default_id = database_id
+        elif default_id is None and idx == 0:
+            default_id = database_id
+
+    if normalized_preferred and default_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provided database_id is not visible for this integration.",
+        )
+
+    for database_id, row in list(by_id.items()):
+        if database_id not in ordered_ids:
+            db.delete(row)
+
+    for row in integration.databases:
+        row.is_default = row.database_id == default_id
+
+    if default_id:
+        integration.database_id = default_id
+    db.flush()
+    return sorted(integration.databases, key=lambda row: (not row.is_default, row.title or row.database_id))
+
+
+def _get_user_notion_database_ids(integration: NotionIntegration) -> list[str]:
+    if integration.databases:
+        return [item.database_id for item in integration.databases]
+    return [_normalize_db_id(integration.database_id)] if integration.database_id else []
+
+
 @app.delete("/chats/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_chat(chat_id: UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     chat = get_user_chat_or_404(db, current_user.id, chat_id)
@@ -466,19 +554,52 @@ def get_messages(chat_id: UUID, current_user: User = Depends(get_current_user), 
 
 @app.post("/integrations/notion/connect", response_model=NotionStatusResponse)
 def connect_notion(
-    payload: NotionConnectRequest,
+    payload_raw: object = Body(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    validate_database_access(payload.api_key, payload.database_id)
+    payload_input: object = payload_raw
+    if isinstance(payload_input, (bytes, bytearray)):
+        payload_input = payload_input.decode("utf-8", errors="ignore")
+    if isinstance(payload_input, str):
+        stripped = payload_input.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                payload_input = json.loads(stripped)
+            except json.JSONDecodeError:
+                payload_input = stripped
+        else:
+            payload_input = stripped
+
+    try:
+        payload = NotionConnectRequest.model_validate(payload_input)
+    except ValidationError as exc:
+        safe_errors = []
+        for error in exc.errors():
+            safe_error = dict(error)
+            if "input" in safe_error and isinstance(safe_error["input"], (bytes, bytearray)):
+                safe_error["input"] = safe_error["input"].decode("utf-8", errors="ignore")
+            safe_errors.append(safe_error)
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=safe_errors) from exc
+
+    preferred_database_id = _normalize_db_id(payload.database_id) if payload.database_id else None
+    if preferred_database_id:
+        validate_database_access(payload.api_key, preferred_database_id)
     integration = db.get(NotionIntegration, current_user.id)
     if integration:
         integration.api_key = payload.api_key
-        integration.database_id = payload.database_id
     else:
-        db.add(NotionIntegration(user_id=current_user.id, api_key=payload.api_key, database_id=payload.database_id))
+        integration = NotionIntegration(
+            user_id=current_user.id,
+            api_key=payload.api_key,
+            database_id=preferred_database_id or "",
+        )
+        db.add(integration)
+        db.flush()
+    databases = _refresh_user_notion_databases(db, integration, preferred_database_id=preferred_database_id)
     db.commit()
-    return NotionStatusResponse(connected=True, database_id=payload.database_id)
+    default_db = next((row.database_id for row in databases if row.is_default), None)
+    return NotionStatusResponse(connected=True, database_id=default_db)
 
 
 @app.post("/integrations/notion/oauth/start", response_model=NotionOAuthStartResponse)
@@ -497,16 +618,19 @@ def notion_oauth_start(
 @app.get("/integrations/notion/oauth/callback", response_model=NotionOAuthCallbackResponse)
 def notion_oauth_callback(code: str, state: str, db: Session = Depends(get_db)):
     user_id, database_id = parse_oauth_state(state)
+    normalized_database_id = _normalize_db_id(database_id)
     api_key = exchange_oauth_code(code)
-    validate_database_access(api_key, database_id)
+    validate_database_access(api_key, normalized_database_id)
     integration = db.get(NotionIntegration, user_id)
     if integration:
         integration.api_key = api_key
-        integration.database_id = database_id
     else:
-        db.add(NotionIntegration(user_id=user_id, api_key=api_key, database_id=database_id))
+        integration = NotionIntegration(user_id=user_id, api_key=api_key, database_id=normalized_database_id)
+        db.add(integration)
+        db.flush()
+    _refresh_user_notion_databases(db, integration, preferred_database_id=normalized_database_id)
     db.commit()
-    return NotionOAuthCallbackResponse(connected=True, database_id=database_id)
+    return NotionOAuthCallbackResponse(connected=True, database_id=normalized_database_id)
 
 
 @app.get("/integrations/notion/status", response_model=NotionStatusResponse)
@@ -514,7 +638,22 @@ def notion_status(current_user: User = Depends(get_current_user), db: Session = 
     integration = db.get(NotionIntegration, current_user.id)
     if not integration:
         return NotionStatusResponse(connected=False)
-    return NotionStatusResponse(connected=True, database_id=integration.database_id)
+    database_ids = _get_user_notion_database_ids(integration)
+    default_id = next((item.database_id for item in integration.databases if item.is_default), None)
+    if not default_id and database_ids:
+        default_id = database_ids[0]
+    return NotionStatusResponse(connected=True, database_id=default_id)
+
+
+@app.get("/integrations/notion/databases", response_model=NotionDatabasesResponse)
+def notion_databases(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    integration = db.get(NotionIntegration, current_user.id)
+    if not integration:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notion integration not connected")
+    rows = sorted(integration.databases, key=lambda row: (not row.is_default, row.title or row.database_id))
+    return NotionDatabasesResponse(
+        items=[NotionDatabaseEntry(database_id=row.database_id, title=row.title, is_default=row.is_default) for row in rows]
+    )
 
 
 @app.delete("/integrations/notion", status_code=status.HTTP_204_NO_CONTENT)
@@ -534,7 +673,13 @@ def notion_context(
     integration = db.get(NotionIntegration, current_user.id)
     if not integration:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notion integration not connected")
-    items = fetch_database_context(integration.api_key, integration.database_id, limit=limit)
+    items: list[dict] = []
+    for database_id in _get_user_notion_database_ids(integration):
+        scoped = fetch_database_context(integration.api_key, database_id, limit=limit)
+        for row in scoped:
+            row.setdefault("properties", {})
+            row["properties"]["source_database_id"] = database_id
+        items.extend(scoped)
     return NotionContextResponse(items=items)
 
 
@@ -549,7 +694,13 @@ def decompose_task_from_notion(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notion integration not connected")
 
     chat = get_user_chat_or_404(db, current_user.id, payload.chat_id)
-    context_items = fetch_database_context(integration.api_key, integration.database_id, limit=50)
+    context_items: list[dict] = []
+    for database_id in _get_user_notion_database_ids(integration):
+        scoped = fetch_database_context(integration.api_key, database_id, limit=50)
+        for row in scoped:
+            row.setdefault("properties", {})
+            row["properties"]["source_database_id"] = database_id
+        context_items.extend(scoped)
     source_task = find_task_in_context(context_items, task_id=payload.task_id, task_title=payload.task_title)
     if not source_task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found in Notion context")
@@ -587,7 +738,13 @@ def send_message(
 
     prompt_content = payload.content
     if integration:
-        items = fetch_database_context(integration.api_key, integration.database_id, limit=10)
+        items: list[dict] = []
+        for database_id in _get_user_notion_database_ids(integration):
+            scoped = fetch_database_context(integration.api_key, database_id, limit=10)
+            for row in scoped:
+                row.setdefault("properties", {})
+                row["properties"]["source_database_id"] = database_id
+            items.extend(scoped)
         if items:
             serialized = json.dumps(items, ensure_ascii=True)
             prompt_content = f"{payload.content}\n\nNotion board context:\n{serialized}"

@@ -6,13 +6,39 @@ export type Tokens = {
   token_type: string;
 };
 
-export type PanelMode = "home" | "chat";
+export type PanelMode = "home" | "chat" | "settings";
 
 export type StoredSession = {
   tokens: Tokens | null;
   activeChatId: string | null;
   panelMode: PanelMode;
 };
+
+export type SummaryResponse = {
+  summary: string;
+  source: string;
+};
+
+export type SemanticSearchResponse = {
+  query: string;
+  notion_matches: Array<{ score: number; item: { title: string; url?: string | null } }>;
+  chat_matches: Array<{ score: number; message: { role: string; content: string } }>;
+  information_matches: Array<{ score: number; source_label: string; snippet: string }>;
+};
+
+export type NotionDatabaseEntry = {
+  database_id: string;
+  title: string;
+  is_default: boolean;
+};
+
+async function sendRuntimeMessage<T = any>(payload: Record<string, any>): Promise<T> {
+  const response = await browser.runtime.sendMessage(payload);
+  if (response?.__error) {
+    throw new Error(response.__error);
+  }
+  return response as T;
+}
 
 export function checkHealth() {
   return sendRuntimeMessage({ type: "health" });
@@ -43,31 +69,55 @@ export function sendMessage(accessToken: string, chatId: string, content: string
 }
 
 export function saveTokens(tokens: Tokens | null) {
-  return browser.runtime.sendMessage({ type: "saveTokens", tokens });
+  return sendRuntimeMessage({ type: "saveTokens", tokens });
 }
 
 export function loadSession(): Promise<StoredSession> {
-  return browser.runtime.sendMessage({ type: "loadSession" });
+  return sendRuntimeMessage({ type: "loadSession" });
 }
 
 export function saveSession(session: Partial<StoredSession>) {
-  return browser.runtime.sendMessage({ type: "saveSession", session });
+  return sendRuntimeMessage({ type: "saveSession", session });
 }
 
-export function connectApi(accessToken: string, apiKey: string, databaseId: string) {
-  return browser.runtime.sendMessage({
+export function connectApi(accessToken: string, apiKey: string, databaseId?: string) {
+  return sendRuntimeMessage({
     type: "connectApi",
     accessToken,
     apiKey,
-    databaseId
+    ...(databaseId ? { databaseId } : {})
   });
 }
 
 export function runDecompose(accessToken: string, chatId: string, taskTitle: string) {
-  return browser.runtime.sendMessage({
+  return sendRuntimeMessage({
     type: "decomposeTask",
     accessToken,
     chatId,
     taskTitle
+  });
+}
+
+export function summarizeText(accessToken: string, text: string) {
+  return sendRuntimeMessage<SummaryResponse>({
+    type: "summarizeText",
+    accessToken,
+    text
+  });
+}
+
+export function findInText(accessToken: string, query: string, chatId?: string | null) {
+  return sendRuntimeMessage<SemanticSearchResponse>({
+    type: "findInText",
+    accessToken,
+    query,
+    ...(chatId ? { chatId } : {})
+  });
+}
+
+export function listNotionDatabases(accessToken: string) {
+  return sendRuntimeMessage<{ items: NotionDatabaseEntry[] }>({
+    type: "listNotionDatabases",
+    accessToken
   });
 }
