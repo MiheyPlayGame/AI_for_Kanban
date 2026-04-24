@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 
 class RegisterRequest(BaseModel):
@@ -70,8 +70,16 @@ class AttachmentRead(BaseModel):
 
 
 class NotionConnectRequest(BaseModel):
-    api_key: str = Field(min_length=1)
-    database_id: str = Field(min_length=1, max_length=128)
+    api_key: str = Field(min_length=1, validation_alias=AliasChoices("api_key", "apiKey"))
+    database_id: str | None = Field(default=None, max_length=128, validation_alias=AliasChoices("database_id", "databaseId"))
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_input(cls, value):
+        # Accept raw token payloads sent as JSON string.
+        if isinstance(value, str):
+            return {"api_key": value.strip()}
+        return value
 
 
 class NotionStatusResponse(BaseModel):
@@ -79,8 +87,18 @@ class NotionStatusResponse(BaseModel):
     database_id: str | None = None
 
 
+class NotionDatabaseEntry(BaseModel):
+    database_id: str
+    title: str = ""
+    is_default: bool = False
+
+
+class NotionDatabasesResponse(BaseModel):
+    items: list[NotionDatabaseEntry]
+
+
 class NotionOAuthStartRequest(BaseModel):
-    database_id: str = Field(min_length=1, max_length=128)
+    database_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class NotionOAuthStartResponse(BaseModel):
@@ -89,7 +107,7 @@ class NotionOAuthStartResponse(BaseModel):
 
 class NotionOAuthCallbackResponse(BaseModel):
     connected: bool
-    database_id: str
+    database_id: str | None = None
 
 
 class NotionContextItem(BaseModel):
@@ -118,3 +136,66 @@ class TaskDecomposeRequest(BaseModel):
 class TaskDecomposeResponse(BaseModel):
     assistant_message: MessageRead
     source_task: NotionContextItem
+
+
+class SummaryContextItem(BaseModel):
+    link: str | None = None
+    text: str | None = None
+    content: str | None = None
+    title: str | None = None
+    properties: dict[str, str | int | float | bool | None | list[str]] = Field(default_factory=dict)
+
+
+class SummaryRequest(BaseModel):
+    text: str | None = None
+    link: str | None = None
+    context: list[SummaryContextItem] = Field(default_factory=list)
+    chat_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_source(self):
+        has_text = bool(self.text and self.text.strip())
+        has_link = bool(self.link and self.link.strip())
+        if has_text == has_link:
+            raise ValueError("Provide exactly one of text or link")
+        return self
+
+
+class SummaryResponse(BaseModel):
+    summary: str
+    source: str
+
+
+class SemanticSearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+    chat_id: UUID | None = None
+    top_k: int = Field(default=5, ge=1, le=20)
+    notion_limit: int = Field(default=20, ge=1, le=50)
+    include_notion: bool = True
+    include_chat_history: bool = True
+
+
+class SemanticNotionMatch(BaseModel):
+    score: float
+    item: NotionContextItem
+
+
+class SemanticChatMatch(BaseModel):
+    score: float
+    message: MessageRead
+
+
+class SemanticInformationMatch(BaseModel):
+    score: float
+    source_type: str
+    source_id: str
+    source_label: str
+    snippet: str
+
+
+class SemanticSearchResponse(BaseModel):
+    query: str
+    answer: str = ""
+    notion_matches: list[SemanticNotionMatch] = Field(default_factory=list)
+    chat_matches: list[SemanticChatMatch] = Field(default_factory=list)
+    information_matches: list[SemanticInformationMatch] = Field(default_factory=list)

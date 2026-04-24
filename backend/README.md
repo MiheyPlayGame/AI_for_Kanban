@@ -61,23 +61,56 @@ docker compose up --build
 - `http://localhost:8000`
 - Swagger: `http://localhost:8000/docs`
 
-## Локальный запуск без Docker
+## Локальный запуск без Docker (Windows + PowerShell)
 
-1. Создай виртуальное окружение и установи зависимости:
+Рекомендуемый режим для работы с Notion/VPN: API запускается локально, PostgreSQL работает в Docker.
+
+1. Перейди в папку `backend` и скопируй `.env.example` в `.env`, если файл еще не создан.
+2. В `.env` укажи локальный адрес БД:
+
+```bash
+DATABASE_URL=postgresql+psycopg://assistant_user:assistant_pass@localhost:5432/assistant_db
+```
+
+3. Запусти только PostgreSQL в Docker:
+
+```bash
+docker compose up -d db
+```
+
+4. Убедись, что порт `5432` не занят локальным PostgreSQL на Windows.
+   Если видишь конфликт, останови локальный сервис PostgreSQL или поменяй порт в `docker-compose.yml`.
+5. Создай и активируй виртуальное окружение:
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+.\.venv\Scripts\Activate.ps1
 ```
 
-2. Подними PostgreSQL отдельно и обнови `DATABASE_URL` в `.env`.
-
-3. Запусти сервер:
+Если PowerShell блокирует активацию:
 
 ```bash
-uvicorn app.main:app --reload
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
 ```
+
+6. Установи зависимости:
+
+```bash
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-llm.txt
+```
+
+7. Запусти API локально:
+
+```bash
+python -m uvicorn app.main:app --reload
+```
+
+8. Проверь, что сервер поднялся:
+   - API: `http://127.0.0.1:8000`
+   - Swagger: `http://127.0.0.1:8000/docs`
 
 ## Переменные окружения
 

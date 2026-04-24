@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, Uuid
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -79,5 +79,25 @@ class NotionIntegration(Base):
     )
     api_key: Mapped[str] = mapped_column(Text, nullable=False)
     database_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    databases: Mapped[list["NotionDatabase"]] = relationship(
+        "NotionDatabase",
+        back_populates="integration",
+        cascade="all, delete-orphan",
+    )
 
     user: Mapped["User"] = relationship("User", back_populates="notion_integration")
+
+
+class NotionDatabase(Base):
+    __tablename__ = "notion_databases"
+
+    user_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("notion_integrations.user_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    database_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    title: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    integration: Mapped["NotionIntegration"] = relationship("NotionIntegration", back_populates="databases")

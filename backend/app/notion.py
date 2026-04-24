@@ -97,6 +97,26 @@ def fetch_database_context(api_key: str, database_id: str, limit: int = 20) -> l
     return result
 
 
+def list_accessible_databases(api_key: str, limit: int = 100) -> list[dict]:
+    raw = _notion_post(
+        api_key,
+        "search",
+        {
+            "filter": {"property": "object", "value": "database"},
+            "page_size": max(1, min(limit, 100)),
+        },
+    )
+    items: list[dict] = []
+    for db in raw.get("results", []):
+        db_id = str(db.get("id") or "")
+        if not db_id:
+            continue
+        title_chunks = db.get("title", []) if isinstance(db.get("title"), list) else []
+        title = "".join(chunk.get("plain_text", "") for chunk in title_chunks).strip()
+        items.append({"database_id": db_id, "title": title})
+    return items
+
+
 def find_task_in_context(
     items: list[dict],
     task_id: str | None = None,
@@ -112,7 +132,7 @@ def find_task_in_context(
     return None
 
 
-def build_oauth_state(user_id: str, database_id: str, ttl_minutes: int) -> str:
+def build_oauth_state(user_id: str, database_id: str | None, ttl_minutes: int) -> str:
     payload = {
         "sub": user_id,
         "type": "notion_oauth_state",
@@ -122,14 +142,15 @@ def build_oauth_state(user_id: str, database_id: str, ttl_minutes: int) -> str:
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
-def parse_oauth_state(state: str) -> tuple[str, str]:
+def parse_oauth_state(state: str) -> tuple[str, str | None]:
     try:
         payload = jwt.decode(state, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
     except JWTError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OAuth state") from exc
-    if payload.get("type") != "notion_oauth_state" or not payload.get("sub") or not payload.get("db"):
+    if payload.get("type") != "notion_oauth_state" or not payload.get("sub"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OAuth state")
-    return str(payload["sub"]), str(payload["db"])
+    raw_db = payload.get("db")
+    return str(payload["sub"]), str(raw_db) if raw_db else None
 
 
 def build_oauth_authorize_url(state: str) -> str:
