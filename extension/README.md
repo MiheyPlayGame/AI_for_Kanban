@@ -14,7 +14,7 @@ This folder contains a cross-browser web extension scaffold (Chromium + Firefox)
   - `POST /chats`
   - `GET /chats/{chat_id}/messages`
   - `POST /chats/{chat_id}/messages`
-- Backend URL default: `http://185.125.101.65:10101`
+- Backend URL default: `https://asya-project.ru`
 
 ## Install
 

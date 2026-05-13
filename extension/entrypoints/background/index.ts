@@ -1,9 +1,11 @@
 import { browser } from "wxt/browser";
 import { defineBackground } from "wxt/utils/define-background";
 
-const DEFAULT_API_BASE_URL = "http://185.125.101.65:10101";
+const DEFAULT_API_BASE_URL = "https://asya-project.ru";
 const LEGACY_PACKAGED_LOCALHOST = "http://localhost:8000";
+const LEGACY_DEFAULT_SERVER_IP = "http://185.125.101.65:10101";
 const API_BASE_URL_MIGRATION_KEY = "apiBaseUrlMigratedFromPackagedLocalhost";
+const API_BASE_URL_MIGRATION_FROM_LEGACY_IP_KEY = "apiBaseUrlMigratedFrom185Server";
 
 function normalizeApiBaseUrl(input?: string) {
   const trimmed = (input ?? "").trim();
@@ -60,11 +62,31 @@ async function migratePackagedLocalhostApiBaseOnce() {
   }
 }
 
+/** One-time: move installs that still point at the previous default host. */
+async function migrateFromLegacyDefaultServerOnce() {
+  try {
+    const storage = await browser.storage.local.get(["apiBaseUrl", API_BASE_URL_MIGRATION_FROM_LEGACY_IP_KEY]);
+    if (storage[API_BASE_URL_MIGRATION_FROM_LEGACY_IP_KEY]) {
+      return;
+    }
+    const trimmed = (storage.apiBaseUrl as string | undefined)?.trim().replace(/\/+$/, "");
+    if (trimmed === LEGACY_DEFAULT_SERVER_IP) {
+      await browser.storage.local.set({ apiBaseUrl: DEFAULT_API_BASE_URL });
+    }
+    await browser.storage.local.set({ [API_BASE_URL_MIGRATION_FROM_LEGACY_IP_KEY]: true });
+  } catch {
+    // Non-fatal
+  }
+}
+
 let apiBaseUrlMigrationPromise: Promise<void> | null = null;
 
 function ensureApiBaseUrlMigrated(): Promise<void> {
   if (!apiBaseUrlMigrationPromise) {
-    apiBaseUrlMigrationPromise = migratePackagedLocalhostApiBaseOnce();
+    apiBaseUrlMigrationPromise = (async () => {
+      await migratePackagedLocalhostApiBaseOnce();
+      await migrateFromLegacyDefaultServerOnce();
+    })();
   }
   return apiBaseUrlMigrationPromise;
 }
