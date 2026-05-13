@@ -1,7 +1,9 @@
 import { browser } from "wxt/browser";
 import { defineBackground } from "wxt/utils/define-background";
 
-const DEFAULT_API_BASE_URL = "http://localhost:8000";
+const DEFAULT_API_BASE_URL = "http://185.125.101.65:10101";
+const LEGACY_PACKAGED_LOCALHOST = "http://localhost:8000";
+const API_BASE_URL_MIGRATION_KEY = "apiBaseUrlMigratedFromPackagedLocalhost";
 
 function normalizeApiBaseUrl(input?: string) {
   const trimmed = (input ?? "").trim();
@@ -17,6 +19,8 @@ type Tokens = {
 };
 
 type RuntimeMessage =
+  | { type: "getApiBaseUrl" }
+  | { type: "saveApiBaseUrl"; apiBaseUrl: string }
   | { type: "health" }
   | { type: "register"; id: string; password: string }
   | { type: "login"; id: string; password: string }
@@ -39,7 +43,34 @@ type RuntimeMessage =
   | { type: "findInText"; accessToken: string; query: string; chatId?: string }
   | { type: "listNotionDatabases"; accessToken: string };
 
+/** Older builds defaulted to localhost; storage keeps that value after DEFAULT changes in code. */
+async function migratePackagedLocalhostApiBaseOnce() {
+  try {
+    const storage = await browser.storage.local.get(["apiBaseUrl", API_BASE_URL_MIGRATION_KEY]);
+    if (storage[API_BASE_URL_MIGRATION_KEY]) {
+      return;
+    }
+    const trimmed = (storage.apiBaseUrl as string | undefined)?.trim();
+    if (trimmed === LEGACY_PACKAGED_LOCALHOST) {
+      await browser.storage.local.set({ apiBaseUrl: DEFAULT_API_BASE_URL });
+    }
+    await browser.storage.local.set({ [API_BASE_URL_MIGRATION_KEY]: true });
+  } catch {
+    // Non-fatal: requests still use getApiBaseUrl / normalize.
+  }
+}
+
+let apiBaseUrlMigrationPromise: Promise<void> | null = null;
+
+function ensureApiBaseUrlMigrated(): Promise<void> {
+  if (!apiBaseUrlMigrationPromise) {
+    apiBaseUrlMigrationPromise = migratePackagedLocalhostApiBaseOnce();
+  }
+  return apiBaseUrlMigrationPromise;
+}
+
 async function getApiBaseUrl() {
+  await ensureApiBaseUrlMigrated();
   const config = await browser.storage.local.get("apiBaseUrl");
   return normalizeApiBaseUrl(config.apiBaseUrl as string | undefined);
 }
@@ -146,6 +177,13 @@ export default defineBackground(() => {
     (async () => {
       let payload: any = null;
       switch (message.type) {
+        case "getApiBaseUrl":
+          payload = { apiBaseUrl: await getApiBaseUrl() };
+          break;
+        case "saveApiBaseUrl":
+          await browser.storage.local.set({ apiBaseUrl: normalizeApiBaseUrl(message.apiBaseUrl) });
+          payload = { apiBaseUrl: await getApiBaseUrl() };
+          break;
         case "health":
           payload = await request("/health");
           break;

@@ -14,7 +14,7 @@ This folder contains a cross-browser web extension scaffold (Chromium + Firefox)
   - `POST /chats`
   - `GET /chats/{chat_id}/messages`
   - `POST /chats/{chat_id}/messages`
-- Backend URL default: `http://localhost:8000`
+- Backend URL default: `http://185.125.101.65:10101`
 
 ## Install
 
@@ -65,6 +65,6 @@ npm run zip:firefox
 
 ## Backend integration notes
 
-- Start backend from the `backend` branch on `http://localhost:8000`
+- For local development, run the backend from the `backend` branch (e.g. on `http://localhost:8000`) and set that URL in the extension settings if needed
 - Extension checks `/health` every 5s
 - Auth is prompted by the panel buttons and backend tokens are stored in extension local storage

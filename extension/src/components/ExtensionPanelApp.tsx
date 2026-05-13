@@ -6,6 +6,7 @@ import {
   checkHealth,
   createChat,
   findInText,
+  getApiBaseUrl,
   getNotionStatus,
   getMessages,
   listNotionContext,
@@ -16,6 +17,7 @@ import {
   type NotionContextItem,
   register,
   runDecompose,
+  saveApiBaseUrl,
   saveSession,
   sendMessage,
   startNotionOAuth,
@@ -208,6 +210,9 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
   const [authNotice, setAuthNotice] = useState("");
   const [panelSize, setPanelSize] = useState<{ width?: number; height?: number }>({});
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const [backendUrlInput, setBackendUrlInput] = useState("");
+  const [savingBackendUrl, setSavingBackendUrl] = useState(false);
+  const [backendUrlHint, setBackendUrlHint] = useState("");
 
   const isAuthenticated = Boolean(tokens?.access_token);
   const isAuthScreen = !isAuthenticated && !bootstrapping;
@@ -247,6 +252,25 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
       stopped = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!open || bootstrapping || panelMode !== "settings" || !tokens?.access_token) {
+      return;
+    }
+    let stopped = false;
+    getApiBaseUrl()
+      .then(({ apiBaseUrl }) => {
+        if (!stopped) {
+          setBackendUrlInput(apiBaseUrl);
+        }
+      })
+      .catch(() => {
+        // Leave draft as-is.
+      });
+    return () => {
+      stopped = true;
+    };
+  }, [open, bootstrapping, panelMode, tokens?.access_token]);
 
   useEffect(() => {
     if (panelMode === "chat" || panelMode === "home") {
@@ -688,6 +712,20 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
     setShowRegisterConfirm(false);
   }
 
+  async function handleSaveBackendUrl() {
+    setBackendUrlHint("");
+    setSavingBackendUrl(true);
+    try {
+      const { apiBaseUrl } = await saveApiBaseUrl(backendUrlInput);
+      setBackendUrlInput(apiBaseUrl);
+      setBackendUrlHint("Server URL saved.");
+    } catch (e: unknown) {
+      setBackendUrlHint(toUserErrorMessage(e, "Could not save server URL."));
+    } finally {
+      setSavingBackendUrl(false);
+    }
+  }
+
   return (
     <div className={`kanban-ai-ext ${open ? "open" : "closed"}`}>
       {open ? (
@@ -949,6 +987,29 @@ export default function ExtensionPanelApp({ initialOpen = false }: ExtensionPane
             <>
               <h2 className="assistant-title">Settings</h2>
               <div className="connect-form">
+                <div className="notion-connection-card">
+                  <p className="notion-connection-title">Backend</p>
+                  <p className="notion-connection-text">Base URL for the API (same as in your terminal curl).</p>
+                  <input
+                    className="hero-chat-input auth-input"
+                    value={backendUrlInput}
+                    onChange={(event) => setBackendUrlInput(event.target.value)}
+                    placeholder="http://host:port"
+                    disabled={loading || savingBackendUrl}
+                    spellCheck={false}
+                  />
+                  <div className="settings-buttons">
+                    <button
+                      className="btn-secondary"
+                      type="button"
+                      onClick={handleSaveBackendUrl}
+                      disabled={loading || savingBackendUrl || !backendUrlInput.trim()}
+                    >
+                      {savingBackendUrl ? "Saving…" : "Save server URL"}
+                    </button>
+                  </div>
+                  {backendUrlHint ? <p className="chat-hint">{backendUrlHint}</p> : null}
+                </div>
                 <div className="notion-connection-card">
                   <p className="notion-connection-title">Notion</p>
                   <p className={`notion-connection-badge ${notionConnected ? "connected" : "disconnected"}`}>

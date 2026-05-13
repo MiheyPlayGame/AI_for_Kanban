@@ -1,4 +1,5 @@
-.output
-node_modules
-dist
-preview/dist
+.output/
+node_modules/
+dist/
+preview/dist/
+.wxt/

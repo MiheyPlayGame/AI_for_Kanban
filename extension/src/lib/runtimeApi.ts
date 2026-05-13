@@ -57,6 +57,14 @@ export function checkHealth() {
   return sendRuntimeMessage({ type: "health" });
 }
 
+export function getApiBaseUrl() {
+  return sendRuntimeMessage<{ apiBaseUrl: string }>({ type: "getApiBaseUrl" });
+}
+
+export function saveApiBaseUrl(apiBaseUrl: string) {
+  return sendRuntimeMessage<{ apiBaseUrl: string }>({ type: "saveApiBaseUrl", apiBaseUrl });
+}
+
 export function register(id: string, password: string) {
   return sendRuntimeMessage({ type: "register", id, password });
 }
